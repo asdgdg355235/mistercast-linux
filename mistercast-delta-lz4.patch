@@ -1,0 +1,1172 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 0bcdce1..e030f81 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -35,6 +35,8 @@ add_library(mistercast_core
+     src/core/StereoSampleRing.h
+     src/stream/GroovyMister.cpp
+     src/stream/GroovyMister.h
++    src/stream/GroovyVideoEncoder.cpp
++    src/stream/GroovyVideoEncoder.h
+     src/stream/GroovyProtocolCodec.cpp
+     src/stream/GroovyProtocolCodec.h
+     src/stream/StreamTimingPolicy.cpp
+@@ -100,7 +102,9 @@ if(BUILD_TESTING)
+ 
+     add_executable(groovy_mister_test tests/GroovyMisterTest.cpp)
+     set_target_properties(groovy_mister_test PROPERTIES AUTOMOC ON)
+-    target_link_libraries(groovy_mister_test PRIVATE mistercast_core Qt6::Test)
++    target_link_libraries(groovy_mister_test PRIVATE mistercast_core Qt6::Test PkgConfig::LZ4)
++    target_link_options(groovy_mister_test PRIVATE
++        -Wl,--wrap=sendmmsg -Wl,--wrap=send -Wl,--wrap=ioctl)
+     target_compile_options(groovy_mister_test PRIVATE -Wall -Wextra -Wpedantic)
+     add_test(NAME groovy_mister COMMAND groovy_mister_test)
+     set_tests_properties(groovy_mister PROPERTIES TIMEOUT 10 LABELS integration)
+diff --git a/docs/delta-lz4.md b/docs/delta-lz4.md
+new file mode 100644
+index 0000000..e3af1ac
+--- /dev/null
++++ b/docs/delta-lz4.md
+@@ -0,0 +1,140 @@
++# Delta-LZ4 video compression
++
++## Diagnosis / objective
++
++The target's clean `main` at `bcb698830119e43a601d90e2226ecd1a7c8954ce`
++matched `s3gfaultx/mistercast-linux` exactly. `GroovyMister::sendFrame()` sent
++full LZ4 for every progressive frame or extracted interlaced field. This change
++adds the receiver's existing delta variant while retaining full LZ4 as the baseline.
++
++## Reference basis
++
++| Repository / revision | Files & symbols inspected | Behavior used |
++| --- | --- | --- |
++| `s3gfaultx/mistercast-linux` / `bcb698830119e43a601d90e2226ecd1a7c8954ce` | `src/stream/GroovyMister.cpp`: `connect`, `sendFrame`, `sendPayload`, `receiveStatus`, `parseStatus`, `waitSync`; `src/stream/GroovyProtocolCodec.cpp`: `makeInitCommand`, `makeBlitCommand`; identical target's `src/stream/StreamSession.cpp`: `run`; `src/core/FrameFields.cpp`: `extractInterlacedField` | INIT mode 1; full LZ4; 1472-byte UDP payloads; preallocated batching; existing pacing, field extraction, parity selection & ACK consumption. |
++| `iequalshane/MiSTerCast` / `b7493f91312e1521cb62e4982561505abfc5b4c1` | `Library/MiSTerCastLib/groovymister.cpp`: `GroovyMister::CmdBlit` | Original content gate, strict 95% size gate, 12/13-byte compressed headers & byte 12 marker. |
++| `psakhis/Groovy_MiSTer` / `109908c9ddbd4397ba7aadb193de61fdb8cb34e6` | `hps_linux/src/support/groovy/groovy.cpp`: `process_packet`, `setBlit`, `setBlitLZ4`, `sendACK`, `groovy_FPGA_status`; `rtl/hps_ext.v`: `SET_BLIT_FIELD_LZ4`; `Groovy.sv`: `S_Delta_Prepare`, `S_Delta_Copy`; `rtl/lz4.v`: `lz4_uncompressed_long` assignments | Receiver accepts the 13-byte delta header under LZ4 negotiation, selects the field framebuffer, & adds each reconstructed byte modulo 256. ACK is sent on header receipt, before payload receipt/decompression. |
++| `idio-sync/MiSTer_GroovyRelay` / `af3f60d5814aede8800d94589f827caa9c21d1ce` | `internal/groovy/constants.go`; `internal/groovy/builder.go`: `BuildBlitHeaderInto`; `internal/dataplane/plane.go`: `chooseFieldPayload`, `shouldForceDeltaLZ4Full`, `recordDeltaLZ4SendState`, `handleTornPayload`, `rememberSentFieldHistory`, `writeFieldSubDeltaInto`; `internal/fakemister/field_decoder.go`: `FieldDecoder.Decode` | Fixed header storage; successful-send history; separate parity identities; invalidation after torn payloads; 30-opportunity full refresh; test receiver reconstruction. |
++| `asdgdg355235/mistercast-wine-linux` / `wine-dll/MiSTerCastLib.cpp` blob `8b70a3b62e223550c99c828e88ec0ef51f648b63` | `send_frame`, `previousFieldPayload_`, `pendingFieldPayload_`, `pendingFieldFrame_`, `deltaFramesSinceFull_` | Explicitly authorized comparison of delayed ACK promotion & refresh policy. Its promotion waits for a later safe frame echo. No code was copied from this port. |
++
++The receiver emits `sendACK(udp_frame, udp_vsync)` inside the command branch
++of `process_packet()`. Payloads reach `setBlitLZ4()` afterward. The target also
++ignores duplicate `frameEcho` values in `parseStatus()`, so it cannot treat a
++later status with the same echo as a reconstruction confirmation. The older
++port's delayed promotion is not evidence of a receiver commit acknowledgement;
++requiring a later field's echo would also prevent consecutive progressive
++frames from immediately using the previous frame as their base.
++
++The implemented policy therefore uses successful local submission, as permitted
++by the task. It adds no ACK wait. Header lengths, marker, field separation &
++byte arithmetic agree with the inspected receiver. Receiver reconstruction is
++not guaranteed by successful UDP submission.
++
++## Change
++
++`GroovyVideoEncoder` owns full-LZ4 output, byte deltas, delta-LZ4 output & two
++raw histories. All five buffers are allocated once from `kMaximumFrameBytes`
++or `LZ4_compressBound`. Encoding, header creation & history updates perform no
++per-frame heap allocation. Returned payload spans remain valid until the next
++`prepare()` call; `commit()` is used synchronously for that prepared payload.
++
++The sender always compresses the raw payload first. With valid same-parity
++history, it computes `uint8_t(current - previous)` & counts unchanged bytes.
++Delta compression runs only when all three strict conditions hold:
++
++```text
++full_lz4_size / raw_size > 0.05
++unchanged_bytes / raw_size > 0.20
++unchanged_bytes / raw_size > 0.90 - full_lz4_size / raw_size
++```
++
++All comparisons use 64-bit integer cross-products. Delta wins only when
++`delta_lz4_size * 100 < full_lz4_size * 95`; equality falls back to full LZ4.
++There is no raw or duplicate-field fallback. INIT byte 1 remains 1.
++
++History is promoted only after the header & every payload datagram have been
++submitted. Progressive mode uses slot 0. Interlaced fields use independent slots
++0 & 1, each with byte count, width, field height & interlace identity. Geometry
++or payload-size mismatches invalidate history. Close/reconnect clears both
++slots; all modeline switches in this transport occur through reconnect.
++
++`kFullRefreshInterval = 30` matches GroovyRelay's `interval - 1` threshold:
++a full field, up to 29 same-parity deltas, then another full field. Every full
++submission resets that parity's counter. A candidate dropped before its
++command changes neither history nor the resync counter.
++
++Failed header or payload submission invalidates both histories. A torn payload
++marks the stream broken & subsequent commands require reconnect, because UDP
++payload chunks have no per-chunk framing. Audio submission failures also clear
++video history because audio uses the same unframed transport. Audio formatting,
++packetization & cadence are unchanged.
++
++The codec preserves the original 12-byte encoder & adds an overload returning
++a fixed 13-byte buffer with its transmitted length. Bytes 0 through 11 retain
++their original encoding. Delta appends `0x01` at byte 12.
++
++Diagnostics-only logging adds cumulative `full_lz4`, `delta_lz4`,
++`delta_content_rejected`, `delta_size_rejected`, `full_resyncs` &
++`history_invalidations`. Send/resync counters count successful submissions;
++rejection counters count compression decisions, including subsequently dropped
++candidates. Connection startup records one history invalidation. Compression
++time includes delta generation, both compression attempts when applicable, &
++the successful raw-history copy. `transmittedBytes` records the selected payload.
++
++## Files changed
++
++- `src/stream/GroovyVideoEncoder.h`, `src/stream/GroovyVideoEncoder.cpp`: new encoder & history state.
++- `src/stream/GroovyMister.h`, `src/stream/GroovyMister.cpp`: encoder integration, submission-bound history, failure invalidation & counters.
++- `src/stream/GroovyProtocolCodec.h`, `src/stream/GroovyProtocolCodec.cpp`: fixed-storage delta header overload.
++- `src/stream/StreamDiagnostics.h`, `src/stream/StreamSession.cpp`, `src/ui/MainWindow.cpp`: diagnostics propagation & logging.
++- `tests/FrameProcessorTest.cpp`: full/delta header goldens.
++- `tests/GroovyMisterTest.cpp`: arithmetic, selection, histories, refresh, UDP reconstruction & injected failures.
++- `CMakeLists.txt`: encoder sources, LZ4 test linkage & test-only syscall wrappers.
++- `docs/delta-lz4.md`: reference basis, behavior & validation.
++
++## Validation
++
++Release build used GCC 13.3.0, Qt 6.8.3, PipeWire 1.0.5 & LZ4 1.9.4.
++Build dependencies were installed into the execution workspace; no repository
++version requirement was lowered. With those dependency paths configured:
++
++```sh
++cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
++cmake --build build
++ctest --test-dir build --output-on-failure
++```
++
++Configuration & build succeeded. CTest passed all four targets:
++`frame_processor`, `groovy_mister`, `concurrency`, `portal_response`.
++
++Tests preserve the existing 12-byte golden & interlaced protocol/ACK test.
++Added coverage checks the 13-byte header, modulo-256 wraparound, decompression
++plus reconstruction, first field behavior, parity separation, progressive mode,
++useful deltas, content/size rejection, periodic refresh, natural-full counter
++reset, geometry changes, invalid payload sizes, unsubmitted candidates & mode
++reset. Progressive/interlaced loopback tests reassemble actual UDP datagrams,
++inflate full/delta payloads & compare every reconstructed field byte.
++
++Test-only linker wrappers inject command failure, failure after the BLIT header,
++failure after one payload chunk, & a pre-command queue drop. They otherwise
++forward to the real Linux syscalls. Failure tests verify send counters, history
++invalidation, broken-stream rejection & full refresh of both parities after
++reconnect. No production syscall hooks were added.
++
++Diff review found no edits to payload slicing/batching/pacing, field selection,
++modeline encoding, capture or normal audio behavior. New vector allocation is
++confined to encoder construction; BLIT headers use stack storage.
++
++## Hardware check
++
++Real MiSTer hardware has not been tested. Check progressive & interlaced modes
++with a mostly static detailed image plus small moving regions, then high-motion
++content. Observe `delta_lz4`, fallback counts & `full_resyncs`; verify image
++reconstruction, field cadence & audio continuity. Reconnect & switch modelines,
++including modes with the same payload size, to check that both parity bases
++restart with full fields.
++
++Periodic full fields reduce dependence on earlier delta frames; they do not
++prove delivery or guarantee recovery from arbitrary packet loss or receiver
++framing loss. The receiver's ACK semantics are settled from source; sustained
++FPGA reconstruction timing & loss behavior still require hardware validation.
+diff --git a/src/stream/GroovyMister.cpp b/src/stream/GroovyMister.cpp
+index 7d3d363..1d3d22d 100644
+--- a/src/stream/GroovyMister.cpp
++++ b/src/stream/GroovyMister.cpp
+@@ -7,8 +7,6 @@
+ #include "core/FrameSequence.h"
+ #include "stream/StreamTimingPolicy.h"
+ 
+-#include <lz4.h>
+-
+ #include <algorithm>
+ #include <array>
+ #include <cerrno>
+@@ -36,8 +34,7 @@ std::string socketError(const char* operation)
+ } // namespace
+ 
+ GroovyMister::GroovyMister()
+-    : compressed_(static_cast<std::size_t>(LZ4_compressBound(kMaximumFrameBytes)))
+-    , messages_(kMaxPayloadPackets)
++    : messages_(kMaxPayloadPackets)
+     , vectors_(kMaxPayloadPackets)
+ {
+ }
+@@ -164,6 +161,13 @@ void GroovyMister::close()
+     consumedStatusGeneration_ = 0;
+     lastFrameNumber_ = 0;
+     diagnostics_ = {};
++    invalidateVideoHistory();
++}
++
++void GroovyMister::invalidateVideoHistory()
++{
++    videoEncoder_.invalidate();
++    ++diagnostics_.historyInvalidations;
+ }
+ 
+ VideoSubmitResult GroovyMister::sendFrame(
+@@ -173,33 +177,34 @@ VideoSubmitResult GroovyMister::sendFrame(
+ {
+     VideoSubmitResult result;
+ 
+-    if (!connected_) {
++    if (!connected_ || streamBroken_) {
+         result.error = "Groovy_MiSTer transport is not connected";
+         return result;
+     }
+ 
+-    if (frame.size() != mode_.payloadBytes() ||
++    if (frame.empty() || frame.size() > kMaximumFrameBytes ||
++        static_cast<unsigned>(field) > 1 || frame.size() != mode_.payloadBytes() ||
+         (!mode_.interlaced && field != FieldParity::Field0OddSourceLines)) {
++        invalidateVideoHistory();
+         result.error = "Frame payload does not match the selected modeline";
+         return result;
+     }
+ 
+     const auto compressionStart = std::chrono::steady_clock::now();
+-    const int compressedSize = LZ4_compress_default(
+-        reinterpret_cast<const char*>(frame.data()),
+-        compressed_.data(),
+-        static_cast<int>(frame.size()),
+-        static_cast<int>(compressed_.size()));
++    const auto encoded = videoEncoder_.prepare(frame, mode_, field);
+     const auto compressionEnd = std::chrono::steady_clock::now();
++    result.timings.compression = compressionEnd - compressionStart;
++    diagnostics_.deltaContentRejections +=
++        encoded.rejection == GroovyVideoEncoder::Rejection::Content;
++    diagnostics_.deltaSizeRejections +=
++        encoded.rejection == GroovyVideoEncoder::Rejection::Size;
+ 
+-    if (compressedSize <= 0) {
++    if (encoded.payload.empty()) {
++        invalidateVideoHistory();
+         result.error = "Unable to compress frame for the negotiated LZ4 stream";
+         return result;
+     }
+-
+-    const auto payload = std::span<const std::uint8_t>(
+-        reinterpret_cast<const std::uint8_t*>(compressed_.data()),
+-        static_cast<std::size_t>(compressedSize));
++    const auto payload = encoded.payload;
+ 
+     const auto syncLine = calculateDeliverySyncLine(
+         mode_,
+@@ -211,31 +216,41 @@ VideoSubmitResult GroovyMister::sendFrame(
+         deliveryMargin_.minimumLines());
+     const auto size = static_cast<std::uint32_t>(payload.size());
+     const auto command = GroovyProtocolCodec::makeBlitCommand(
+-        frameNumber, field, syncLine, size);
++        frameNumber, field, syncLine, size, encoded.delta);
+ 
+     if (!waitForSendCapacity(
+             result.error, result.timings.capacityWait, std::chrono::milliseconds(0))) {
+         result.status = VideoSubmitStatus::DroppedBeforeCommand;
+-        result.timings.compression = compressionEnd - compressionStart;
+         return result;
+     }
+ 
+-    if (!sendCommand(command, result.error)) {
++    if (!sendCommand(command.bytes(), result.error)) {
++        invalidateVideoHistory();
+         return result;
+     }
+ 
+     const auto sendStart = std::chrono::steady_clock::now();
+     if (!sendPayload(payload, result.error)) {
++        invalidateVideoHistory();
++        streamBroken_ = true;
+         return result;
+     }
+ 
+     const auto sendEnd = std::chrono::steady_clock::now();
+ 
++    // Receiver ACK is sent at BLIT header receipt, before reconstruction.
++    // Successful UDP submission is the base policy, bounded by full refreshes.
++    const auto historyStart = std::chrono::steady_clock::now();
++    videoEncoder_.commit(frame, field, encoded);
++    result.timings.compression += std::chrono::steady_clock::now() - historyStart;
++    diagnostics_.fullLz4Sends += !encoded.delta;
++    diagnostics_.deltaLz4Sends += encoded.delta;
++    diagnostics_.forcedFullResyncs += encoded.forcedFull;
++
+     lastStreamDuration_ = sendEnd - sendStart;
+     lastFrameNumber_ = frameNumber;
+ 
+     result.status = VideoSubmitStatus::Sent;
+-    result.timings.compression = compressionEnd - compressionStart;
+     result.timings.socketSubmission = lastStreamDuration_;
+     result.timings.transmittedBytes = payload.size();
+     result.timings.deliveryReserveLines = static_cast<std::uint16_t>(mode_.vTotal - syncLine);
+@@ -273,6 +288,7 @@ bool GroovyMister::sendAudio(std::span<const std::int16_t> samples, std::string&
+     const auto protocolSize = static_cast<std::uint16_t>(byteSize);
+     const auto command = GroovyProtocolCodec::makeAudioCommand(protocolSize);
+     if (!sendCommand(command, error)) {
++        invalidateVideoHistory();
+         return false;
+     }
+ 
+@@ -280,9 +296,13 @@ bool GroovyMister::sendAudio(std::span<const std::int16_t> samples, std::string&
+         std::span<const std::uint8_t>(
+             reinterpret_cast<const std::uint8_t*>(samples.data()), samples.size_bytes()),
+         error);
+-    
+-        if (sent) {
++
++    if (sent) {
+         ++diagnostics_.audioPacketsSent;
++    } else {
++        // Audio shares the unframed payload stream with video.
++        invalidateVideoHistory();
++        streamBroken_ = true;
+     }
+ 
+     return sent;
+@@ -372,6 +392,10 @@ void GroovyMister::pollStatus()
+ 
+ bool GroovyMister::sendCommand(std::span<const std::uint8_t> command, std::string& error)
+ {
++    if (streamBroken_) {
++        error = "Groovy_MiSTer payload stream is broken; reconnect required";
++        return false;
++    }
+     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(10);
+ 
+     for (;;) {
+diff --git a/src/stream/GroovyMister.h b/src/stream/GroovyMister.h
+index c73e5f1..9b1e2d5 100644
+--- a/src/stream/GroovyMister.h
++++ b/src/stream/GroovyMister.h
+@@ -3,6 +3,7 @@
+ #include "core/Modeline.h"
+ #include "core/StreamTypes.h"
+ #include "stream/GroovyProtocolCodec.h"
++#include "stream/GroovyVideoEncoder.h"
+ #include "stream/StreamTimingPolicy.h"
+ 
+ #include <chrono>
+@@ -44,6 +45,12 @@ struct FrameCapacityResult {
+ };
+ 
+ struct TransportDiagnostics {
++    std::uint64_t fullLz4Sends{};
++    std::uint64_t deltaLz4Sends{};
++    std::uint64_t deltaContentRejections{};
++    std::uint64_t deltaSizeRejections{};
++    std::uint64_t forcedFullResyncs{};
++    std::uint64_t historyInvalidations{};
+     std::uint64_t audioPacketsRequested{};
+     std::uint64_t audioPacketsSent{};
+     std::uint64_t audioPacketsCoreDisabled{};
+@@ -101,6 +108,7 @@ private:
+         std::chrono::milliseconds maximumWait);
+     
+     int sampleSocketQueue();
++    void invalidateVideoHistory();
+     void pollStatus();
+     std::uint64_t receiveStatus(std::chrono::milliseconds timeout);
+     bool parseStatus(
+@@ -114,7 +122,7 @@ private:
+     FpgaStatus status_{};
+     Modeline mode_{kDefaultModeline};
+     AdaptiveDeliveryMargin deliveryMargin_;
+-    std::vector<char> compressed_;
++    GroovyVideoEncoder videoEncoder_;
+     std::vector<mmsghdr> messages_;
+     std::vector<iovec> vectors_;
+ 
+diff --git a/src/stream/GroovyProtocolCodec.cpp b/src/stream/GroovyProtocolCodec.cpp
+index 4421f83..2458889 100644
+--- a/src/stream/GroovyProtocolCodec.cpp
++++ b/src/stream/GroovyProtocolCodec.cpp
+@@ -1,6 +1,7 @@
+ #include "stream/GroovyProtocolCodec.h"
+ 
+ #include <cstring>
++#include <algorithm>
+ #include <type_traits>
+ 
+ namespace mistercast::GroovyProtocolCodec {
+@@ -74,6 +75,18 @@ BlitCommand makeBlitCommand(
+     return packet;
+ }
+ 
++CompressedBlitCommand makeBlitCommand(
++    std::uint32_t frameNumber, FieldParity field, std::uint16_t syncLine,
++    std::uint32_t compressedSize, bool delta)
++{
++    const auto full = makeBlitCommand(frameNumber, field, syncLine, compressedSize);
++    CompressedBlitCommand command{};
++    std::copy(full.begin(), full.end(), command.storage.begin());
++    command.storage[12] = delta ? 0x01 : 0x00;
++    command.length = delta ? 13 : 12;
++    return command;
++}
++
+ AudioCommand makeAudioCommand(std::uint16_t payloadBytes)
+ {
+     AudioCommand packet{};
+diff --git a/src/stream/GroovyProtocolCodec.h b/src/stream/GroovyProtocolCodec.h
+index 4ee3dd4..fde4a9c 100644
+--- a/src/stream/GroovyProtocolCodec.h
++++ b/src/stream/GroovyProtocolCodec.h
+@@ -29,6 +29,14 @@ inline constexpr std::size_t kStatusPacketSize = 13;
+ using InitCommand = std::array<std::uint8_t, 5>;
+ using ModeSwitchCommand = std::array<std::uint8_t, 26>;
+ using BlitCommand = std::array<std::uint8_t, 12>;
++struct CompressedBlitCommand {
++    std::array<std::uint8_t, 13> storage{};
++    std::size_t length{};
++    [[nodiscard]] std::span<const std::uint8_t> bytes() const
++    {
++        return std::span(storage).first(length);
++    }
++};
+ using AudioCommand = std::array<std::uint8_t, 3>;
+ using StatusPacket = std::array<std::uint8_t, kStatusPacketSize>;
+ 
+@@ -39,6 +47,9 @@ using StatusPacket = std::array<std::uint8_t, kStatusPacketSize>;
+     FieldParity field,
+     std::uint16_t syncLine,
+     std::uint32_t compressedSize);
++[[nodiscard]] CompressedBlitCommand makeBlitCommand(
++    std::uint32_t frameNumber, FieldParity field, std::uint16_t syncLine,
++    std::uint32_t compressedSize, bool delta);
+ [[nodiscard]] AudioCommand makeAudioCommand(std::uint16_t payloadBytes);
+ [[nodiscard]] FpgaStatus decodeStatus(
+     std::span<const std::uint8_t, kStatusPacketSize> packet);
+diff --git a/src/stream/GroovyVideoEncoder.cpp b/src/stream/GroovyVideoEncoder.cpp
+new file mode 100644
+index 0000000..b9afe06
+--- /dev/null
++++ b/src/stream/GroovyVideoEncoder.cpp
+@@ -0,0 +1,104 @@
++#include "stream/GroovyVideoEncoder.h"
++
++#include <lz4.h>
++
++#include <algorithm>
++
++namespace mistercast {
++
++GroovyVideoEncoder::GroovyVideoEncoder()
++    : fullLz4_(LZ4_compressBound(kMaximumFrameBytes))
++    , delta_(kMaximumFrameBytes)
++    , deltaLz4_(fullLz4_.size())
++{
++    for (auto& history : history_) {
++        history.raw.resize(kMaximumFrameBytes);
++    }
++}
++
++void GroovyVideoEncoder::invalidate()
++{
++    for (auto& history : history_) {
++        history.valid = false;
++        history.identity = {};
++        history.deltasSinceFull = 0;
++    }
++    identity_ = {};
++}
++
++GroovyVideoEncoder::EncodedFrame GroovyVideoEncoder::prepare(
++    std::span<const std::uint8_t> raw, const Modeline& mode, FieldParity field)
++{
++    const auto slot = static_cast<unsigned>(field);
++    if (slot > 1 || raw.empty() || raw.size() > kMaximumFrameBytes ||
++        raw.size() != mode.payloadBytes() || (!mode.interlaced && slot != 0)) {
++        invalidate();
++        return {};
++    }
++    const Identity identity{raw.size(), mode.hActive, mode.payloadHeight(), mode.interlaced};
++    if (identity != identity_) {
++        invalidate();
++        identity_ = identity;
++    }
++
++    const int fullSize = LZ4_compress_default(
++        reinterpret_cast<const char*>(raw.data()), fullLz4_.data(),
++        static_cast<int>(raw.size()), static_cast<int>(fullLz4_.size()));
++    if (fullSize <= 0) {
++        return {};
++    }
++    EncodedFrame result{
++        std::span(reinterpret_cast<const std::uint8_t*>(fullLz4_.data()), fullSize)};
++    const auto& history = history_[slot];
++    if (!history.valid || history.identity != identity) {
++        return result;
++    }
++    if (history.deltasSinceFull >= kFullRefreshInterval - 1) {
++        result.forcedFull = true;
++        return result;
++    }
++
++    std::uint64_t unchanged = 0;
++    for (std::size_t i = 0; i < raw.size(); ++i) {
++        delta_[i] = static_cast<std::uint8_t>(raw[i] - history.raw[i]);
++        unchanged += delta_[i] == 0;
++    }
++    // Original MiSTerCast CmdBlit content gate, expressed as exact integer
++    // inequalities: full/raw > .05, match/raw > .20, (match+full)/raw > .90.
++    const auto full = static_cast<std::uint64_t>(fullSize);
++    const auto bytes = static_cast<std::uint64_t>(raw.size());
++    if (full * 100 <= bytes * 5 || unchanged * 100 <= bytes * 20 ||
++        (unchanged + full) * 100 <= bytes * 90) {
++        result.rejection = Rejection::Content;
++        return result;
++    }
++    const int deltaSize = LZ4_compress_default(
++        reinterpret_cast<const char*>(delta_.data()), deltaLz4_.data(),
++        static_cast<int>(raw.size()), static_cast<int>(deltaLz4_.size()));
++    if (deltaSize > 0 && static_cast<std::uint64_t>(deltaSize) * 100 < full * 95) {
++        result.payload = std::span(
++            reinterpret_cast<const std::uint8_t*>(deltaLz4_.data()), deltaSize);
++        result.delta = true;
++    } else {
++        result.rejection = Rejection::Size;
++    }
++    return result;
++}
++
++void GroovyVideoEncoder::commit(std::span<const std::uint8_t> raw,
++    FieldParity field, const EncodedFrame& encoded)
++{
++    const auto slot = static_cast<unsigned>(field);
++    if (slot > 1 || encoded.payload.empty() || raw.size() != identity_.bytes ||
++        raw.size() > kMaximumFrameBytes) {
++        invalidate();
++        return;
++    }
++    auto& history = history_[slot];
++    std::copy(raw.begin(), raw.end(), history.raw.begin());
++    history.identity = identity_;
++    history.valid = true;
++    history.deltasSinceFull = encoded.delta ? history.deltasSinceFull + 1 : 0;
++}
++
++} // namespace mistercast
+diff --git a/src/stream/GroovyVideoEncoder.h b/src/stream/GroovyVideoEncoder.h
+new file mode 100644
+index 0000000..909eaaa
+--- /dev/null
++++ b/src/stream/GroovyVideoEncoder.h
+@@ -0,0 +1,57 @@
++#pragma once
++
++#include "core/Modeline.h"
++#include "core/StreamTypes.h"
++
++#include <array>
++#include <cstdint>
++#include <span>
++#include <vector>
++
++namespace mistercast {
++
++// Single-owner encoder. prepare() never promotes a candidate to history;
++// the transport must call commit() only after submitting the entire payload.
++class GroovyVideoEncoder {
++public:
++    // GroovyRelay: 29 deltas, then a full field on opportunity 30.
++    static constexpr unsigned kFullRefreshInterval = 30;
++
++    enum class Rejection { None, Content, Size };
++    struct EncodedFrame {
++        std::span<const std::uint8_t> payload;
++        bool delta{};
++        bool forcedFull{};
++        Rejection rejection{};
++    };
++
++    GroovyVideoEncoder();
++    [[nodiscard]] EncodedFrame prepare(
++        std::span<const std::uint8_t> raw, const Modeline& mode, FieldParity field);
++    void commit(std::span<const std::uint8_t> raw, FieldParity field,
++        const EncodedFrame& encoded);
++    void invalidate();
++
++private:
++    struct Identity {
++        std::size_t bytes{};
++        std::uint16_t width{};
++        std::uint16_t height{};
++        bool interlaced{};
++        bool operator==(const Identity&) const = default;
++    };
++    struct History {
++        std::vector<std::uint8_t> raw;
++        Identity identity{};
++        unsigned deltasSinceFull{};
++        bool valid{};
++    };
++
++    std::vector<char> fullLz4_;
++    std::vector<std::uint8_t> delta_;
++    std::vector<char> deltaLz4_;
++    std::array<History, 2> history_;
++    Identity identity_{};
++};
++
++} // namespace mistercast
+diff --git a/src/stream/StreamDiagnostics.h b/src/stream/StreamDiagnostics.h
+index 9e1adc2..c110c2a 100644
+--- a/src/stream/StreamDiagnostics.h
++++ b/src/stream/StreamDiagnostics.h
+@@ -21,6 +21,12 @@ struct VideoDiagnostics {
+     std::uint32_t averagePayloadBytes{};
+     std::uint16_t deliveryReserveLines{};
+     std::uint32_t intervalDroppedFrames{};
++    std::uint64_t fullLz4Sends{};
++    std::uint64_t deltaLz4Sends{};
++    std::uint64_t deltaContentRejections{};
++    std::uint64_t deltaSizeRejections{};
++    std::uint64_t forcedFullResyncs{};
++    std::uint64_t historyInvalidations{};
+ };
+ 
+ struct AudioDiagnostics {
+diff --git a/src/stream/StreamSession.cpp b/src/stream/StreamSession.cpp
+index b418282..fc1c2be 100644
+--- a/src/stream/StreamSession.cpp
++++ b/src/stream/StreamSession.cpp
+@@ -271,6 +271,7 @@ void StreamSession::run(std::stop_token stopToken)
+                         percentile * static_cast<double>(count - 1)));
+             };
+ 
++            const auto& transportDiagnostics = transport.diagnostics();
+             emit videoDiagnostics(VideoDiagnostics{
+                 .frameNumber = frameNumber,
+                 .capturedFrames = capturedFrames,
+@@ -300,10 +301,15 @@ void StreamSession::run(std::stop_token stopToken)
+                     static_cast<std::uint32_t>(totalPayload / statisticFrames),
+                 .deliveryReserveLines = deliveryReserveLines,
+                 .intervalDroppedFrames = droppedFrames,
++                .fullLz4Sends = transportDiagnostics.fullLz4Sends,
++                .deltaLz4Sends = transportDiagnostics.deltaLz4Sends,
++                .deltaContentRejections = transportDiagnostics.deltaContentRejections,
++                .deltaSizeRejections = transportDiagnostics.deltaSizeRejections,
++                .forcedFullResyncs = transportDiagnostics.forcedFullResyncs,
++                .historyInvalidations = transportDiagnostics.historyInvalidations,
+             });
+ 
+             const auto audioCaptureDiagnostics = audioCapture_.diagnostics();
+-            const auto& transportDiagnostics = transport.diagnostics();
+ 
+             emit audioDiagnostics(AudioDiagnostics{
+                 .requestedPackets = transportDiagnostics.audioPacketsRequested,
+diff --git a/src/ui/MainWindow.cpp b/src/ui/MainWindow.cpp
+index 1261bd5..084a294 100644
+--- a/src/ui/MainWindow.cpp
++++ b/src/ui/MainWindow.cpp
+@@ -203,7 +203,13 @@ MainWindow::MainWindow(QWidget* parent)
+                     << " submit_us=" << snapshot.averageSubmissionUs
+                     << " payload_bytes=" << snapshot.averagePayloadBytes
+                     << " reserve_lines=" << snapshot.deliveryReserveLines
+-                    << " drops=" << snapshot.intervalDroppedFrames;
++                    << " drops=" << snapshot.intervalDroppedFrames
++                    << " full_lz4=" << snapshot.fullLz4Sends
++                    << " delta_lz4=" << snapshot.deltaLz4Sends
++                    << " delta_content_rejected=" << snapshot.deltaContentRejections
++                    << " delta_size_rejected=" << snapshot.deltaSizeRejections
++                    << " full_resyncs=" << snapshot.forcedFullResyncs
++                    << " history_invalidations=" << snapshot.historyInvalidations;
+             }
+             latencyStatus_->setText(
+                 QStringLiteral("Frame %1  |  captured/reused %2/%3  |  new-frame dequeue age p50/p95/max %4/%5/%6 ms  |  capture process/ready %7/%8 us  |  LZ4/queue/submit %9/%10/%11 us  |  %12 B  |  reserve %13 lines  |  interval drops %14")
+diff --git a/tests/FrameProcessorTest.cpp b/tests/FrameProcessorTest.cpp
+index 47db5a6..375870c 100644
+--- a/tests/FrameProcessorTest.cpp
++++ b/tests/FrameProcessorTest.cpp
+@@ -281,6 +281,17 @@ void CoreTest::protocolCodecGoldens()
+             0x5060,
+             0x10203040),
+         expectedBlit);
++    const auto full = GroovyProtocolCodec::makeBlitCommand(
++        0x01020304, FieldParity::Field1EvenSourceLines, 0x5060, 0x10203040, false);
++    QCOMPARE(full.bytes().size(), std::size_t{12});
++    QVERIFY(std::equal(full.bytes().begin(), full.bytes().end(), expectedBlit.begin()));
++    const auto delta = GroovyProtocolCodec::makeBlitCommand(
++        0x01020304, FieldParity::Field1EvenSourceLines, 0x5060, 0x10203040, true);
++    const std::array<std::uint8_t, 13> expectedDelta{
++        0x07, 0x04, 0x03, 0x02, 0x01, 0x01,
++        0x60, 0x50, 0x40, 0x30, 0x20, 0x10, 0x01};
++    QCOMPARE(delta.bytes().size(), expectedDelta.size());
++    QVERIFY(std::equal(delta.bytes().begin(), delta.bytes().end(), expectedDelta.begin()));
+     QCOMPARE(
+         GroovyProtocolCodec::makeAudioCommand(0x1234),
+         (GroovyProtocolCodec::AudioCommand{0x04, 0x34, 0x12}));
+diff --git a/tests/GroovyMisterTest.cpp b/tests/GroovyMisterTest.cpp
+index 60abc03..a38013c 100644
+--- a/tests/GroovyMisterTest.cpp
++++ b/tests/GroovyMisterTest.cpp
+@@ -2,6 +2,10 @@
+ #include "stream/GroovyMister.h"
+ 
+ #include <QtTest>
++#include <lz4.h>
++#include <cerrno>
++#include <cstdarg>
++#include <sys/ioctl.h>
+ 
+ #include <arpa/inet.h>
+ #include <array>
+@@ -40,6 +44,12 @@ class GroovyMisterTest final : public QObject {
+ 
+ private slots:
+     void lz4InterlacedProtocolAndAckCoherence();
++    void deltaArithmeticAndSelection();
++    void parityHistoryAndResync();
++    void geometryAndUnsubmittedHistory();
++    void deltaUdpRoundTrip_data();
++    void deltaUdpRoundTrip();
++    void failedSubmissionInvalidatesHistory();
+ };
+ 
+ void GroovyMisterTest::lz4InterlacedProtocolAndAckCoherence()
+@@ -225,6 +235,446 @@ void GroovyMisterTest::lz4InterlacedProtocolAndAckCoherence()
+     QVERIFY(protocolValid.load());
+ }
+ 
++namespace {
++
++std::vector<std::uint8_t> randomField(std::size_t bytes, std::uint32_t seed)
++{
++    std::vector<std::uint8_t> raw(bytes);
++    for (auto& byte : raw) {
++        seed ^= seed << 13;
++        seed ^= seed >> 17;
++        seed ^= seed << 5;
++        byte = static_cast<std::uint8_t>(seed);
++    }
++    return raw;
++}
++
++std::vector<std::uint8_t> inflate(std::span<const std::uint8_t> payload, std::size_t bytes)
++{
++    std::vector<std::uint8_t> raw(bytes);
++    const int count = LZ4_decompress_safe(
++        reinterpret_cast<const char*>(payload.data()), reinterpret_cast<char*>(raw.data()),
++        static_cast<int>(payload.size()), static_cast<int>(raw.size()));
++    if (count != static_cast<int>(bytes)) {
++        raw.clear();
++    }
++    return raw;
++}
++
++void reconstruct(std::vector<std::uint8_t>& delta, const std::vector<std::uint8_t>& previous)
++{
++    for (std::size_t i = 0; i < delta.size(); ++i) {
++        delta[i] = static_cast<std::uint8_t>(delta[i] + previous[i]);
++    }
++}
++
++const Modeline testMode{"64x64", 6.7, 64, 336, 367, 426, 64, 244, 247, 262, false};
++constexpr auto field0 = FieldParity::Field0OddSourceLines;
++constexpr auto field1 = FieldParity::Field1EvenSourceLines;
++
++// Test-only linker wrappers forward real UDP calls except while a failure is
++// armed. No production transport hooks or replacement packetizer are needed.
++std::atomic_int payloadBudget{-1};
++std::atomic_bool failCommand{false};
++std::atomic_bool holdQueue{false};
++
++} // namespace
++
++extern "C" int __real_sendmmsg(int, mmsghdr*, unsigned int, int);
++extern "C" ssize_t __real_send(int, const void*, std::size_t, int);
++extern "C" int __real_ioctl(int, unsigned long, ...);
++
++extern "C" int __wrap_sendmmsg(int fd, mmsghdr* messages, unsigned int count, int flags)
++{
++    const int budget = payloadBudget.load();
++    if (budget == 0) {
++        errno = EIO;
++        return -1;
++    }
++    const int sent = __real_sendmmsg(fd, messages,
++        budget < 0 ? count : std::min(count, static_cast<unsigned>(budget)), flags);
++    if (budget > 0 && sent > 0) {
++        payloadBudget -= sent;
++    }
++    return sent;
++}
++
++extern "C" ssize_t __wrap_send(int fd, const void* bytes, std::size_t size, int flags)
++{
++    if (failCommand.load()) {
++        errno = EIO;
++        return -1;
++    }
++    return __real_send(fd, bytes, size, flags);
++}
++
++extern "C" int __wrap_ioctl(int fd, unsigned long request, ...)
++{
++    va_list args;
++    va_start(args, request);
++    auto* pointer = va_arg(args, void*);
++    va_end(args);
++    if (request == TIOCOUTQ && holdQueue.load()) {
++        *static_cast<int*>(pointer) = 32768;
++        return 0;
++    }
++    return __real_ioctl(fd, request, pointer);
++}
++
++void GroovyMisterTest::deltaArithmeticAndSelection()
++{
++    GroovyVideoEncoder encoder;
++    auto base = randomField(testMode.payloadBytes(), 0x12345678);
++    base[0] = 250; base[1] = 5; base[2] = 255; base[3] = 0;
++    auto choice = encoder.prepare(base, testMode, field0);
++    QVERIFY(!choice.delta);
++    QCOMPARE(inflate(choice.payload, base.size()), base);
++    encoder.commit(base, field0, choice);
++
++    auto current = base;
++    current[0] = 5; current[1] = 250; current[2] = 0; current[3] = 255;
++    choice = encoder.prepare(current, testMode, field0);
++    QVERIFY(choice.delta);
++    auto delta = inflate(choice.payload, current.size());
++    QCOMPARE(delta.size(), current.size());
++    QCOMPARE(delta[0], std::uint8_t{11});
++    QCOMPARE(delta[1], std::uint8_t{245});
++    QCOMPARE(delta[2], std::uint8_t{1});
++    QCOMPARE(delta[3], std::uint8_t{255});
++    reconstruct(delta, base);
++    QCOMPARE(delta, current);
++    encoder.commit(current, field0, choice);
++
++    auto unrelated = randomField(base.size(), 0x87654321);
++    choice = encoder.prepare(unrelated, testMode, field0);
++    QVERIFY(!choice.delta);
++    QCOMPARE(choice.rejection, GroovyVideoEncoder::Rejection::Content);
++    QCOMPARE(inflate(choice.payload, unrelated.size()), unrelated);
++
++    // Both candidates have the same zero prefix and independent random tails:
++    // enough matches to try delta, but no 5% compressed-size improvement.
++    std::fill(base.begin(), base.begin() + base.size() / 4, 0);
++    std::fill(unrelated.begin(), unrelated.begin() + unrelated.size() / 4, 0);
++    choice = encoder.prepare(base, testMode, field0);
++    encoder.commit(base, field0, choice);
++    choice = encoder.prepare(unrelated, testMode, field0);
++    QVERIFY(!choice.delta);
++    QCOMPARE(choice.rejection, GroovyVideoEncoder::Rejection::Size);
++    QCOMPARE(inflate(choice.payload, unrelated.size()), unrelated);
++
++    std::vector<std::uint8_t> zeros(base.size());
++    choice = encoder.prepare(zeros, testMode, field0);
++    encoder.commit(zeros, field0, choice);
++    choice = encoder.prepare(zeros, testMode, field0);
++    QVERIFY(!choice.delta);
++    QCOMPARE(choice.rejection, GroovyVideoEncoder::Rejection::Content);
++}
++
++void GroovyMisterTest::parityHistoryAndResync()
++{
++    auto mode = testMode;
++    mode.interlaced = true;
++    mode.vActive *= 2;
++    GroovyVideoEncoder encoder;
++    const auto odd = randomField(mode.payloadBytes(), 0x12345678);
++    const auto even = randomField(mode.payloadBytes(), 0x87654321);
++    auto choice = encoder.prepare(odd, mode, field0);
++    QVERIFY(!choice.delta);
++    encoder.commit(odd, field0, choice);
++    choice = encoder.prepare(even, mode, field1);
++    QVERIFY(!choice.delta);
++    encoder.commit(even, field1, choice);
++
++    for (unsigned i = 1; i <= GroovyVideoEncoder::kFullRefreshInterval; ++i) {
++        choice = encoder.prepare(odd, mode, field0);
++        QCOMPARE(choice.forcedFull, i == GroovyVideoEncoder::kFullRefreshInterval);
++        QCOMPARE(choice.delta, i < GroovyVideoEncoder::kFullRefreshInterval);
++        auto decoded = inflate(choice.payload, odd.size());
++        if (choice.delta) reconstruct(decoded, odd);
++        QCOMPARE(decoded, odd);
++        encoder.commit(odd, field0, choice);
++    }
++    choice = encoder.prepare(even, mode, field1);
++    QVERIFY(choice.delta); // field 0's resync does not age field 1's history
++    auto decoded = inflate(choice.payload, even.size());
++    reconstruct(decoded, even);
++    QCOMPARE(decoded, even);
++    encoder.commit(even, field1, choice);
++    choice = encoder.prepare(odd, mode, field0);
++    QVERIFY(choice.delta); // full resync reset the counter
++
++    // A natural full fallback also resets the counter.
++    const auto fresh = randomField(odd.size(), 0x55667788);
++    choice = encoder.prepare(fresh, mode, field0);
++    QVERIFY(!choice.delta);
++    encoder.commit(fresh, field0, choice);
++    for (unsigned i = 1; i < GroovyVideoEncoder::kFullRefreshInterval; ++i) {
++        choice = encoder.prepare(fresh, mode, field0);
++        QVERIFY(choice.delta);
++        encoder.commit(fresh, field0, choice);
++    }
++    encoder.invalidate();
++    for (auto field : {field0, field1}) {
++        choice = encoder.prepare(odd, mode, field);
++        QVERIFY(!choice.delta);
++        QVERIFY(!choice.forcedFull);
++    }
++}
++
++void GroovyMisterTest::geometryAndUnsubmittedHistory()
++{
++    GroovyVideoEncoder encoder;
++    auto mode = testMode;
++    auto base = randomField(mode.payloadBytes(), 0x12345678);
++    auto choice = encoder.prepare(base, mode, field0);
++    // Preparing without successful submission must not create history.
++    choice = encoder.prepare(base, mode, field0);
++    QVERIFY(!choice.delta);
++    encoder.commit(base, field0, choice);
++    auto unsent = base;
++    ++unsent[10];
++    choice = encoder.prepare(unsent, mode, field0);
++    QVERIFY(choice.delta);
++    auto current = base;
++    ++current[20];
++    choice = encoder.prepare(current, mode, field0);
++    auto decoded = inflate(choice.payload, base.size());
++    reconstruct(decoded, base);
++    QCOMPARE(decoded, current); // skipped candidate was not the base
++    encoder.commit(current, field0, choice);
++
++    // Same byte count with different geometry cannot reuse old history.
++    mode.hActive *= 2;
++    mode.vActive /= 2;
++    choice = encoder.prepare(current, mode, field0);
++    QVERIFY(!choice.delta);
++    encoder.commit(current, field0, choice);
++    mode.interlaced = true;
++    mode.vActive *= 2;
++    choice = encoder.prepare(current, mode, field0);
++    QVERIFY(!choice.delta);
++    encoder.commit(current, field0, choice);
++    choice = encoder.prepare(current, mode, field1);
++    QVERIFY(!choice.delta);
++    encoder.commit(current, field1, choice);
++    mode.interlaced = false;
++    mode.vActive /= 2;
++    choice = encoder.prepare(current, mode, field0);
++    QVERIFY(!choice.delta); // progressive must establish its own base
++    encoder.commit(current, field0, choice);
++    choice = encoder.prepare(current, mode, field0);
++    QVERIFY(choice.delta);
++    choice = encoder.prepare(current, mode, field1);
++    QVERIFY(choice.payload.empty());
++    choice = encoder.prepare(current, mode, field0);
++    QVERIFY(!choice.delta);
++    encoder.commit(current, field0, choice);
++    current.pop_back();
++    QVERIFY(encoder.prepare(current, mode, field0).payload.empty());
++    current.push_back(0);
++    QVERIFY(!encoder.prepare(current, mode, field0).delta);
++    mode.hActive /= 2;
++    current.resize(mode.payloadBytes());
++    QVERIFY(!encoder.prepare(current, mode, field0).delta);
++}
++
++
++namespace {
++
++class LocalReceiver {
++public:
++    LocalReceiver()
++    {
++        socket_ = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_UDP);
++        address_.sin_family = AF_INET;
++        address_.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++        if (socket_ < 0 || bind(socket_, reinterpret_cast<sockaddr*>(&address_), sizeof(address_)) < 0) {
++            return;
++        }
++        socklen_t size = sizeof(address_);
++        ready_ = getsockname(socket_, reinterpret_cast<sockaddr*>(&address_), &size) == 0;
++    }
++    ~LocalReceiver() { if (socket_ >= 0) ::close(socket_); }
++
++    bool connectTransport(GroovyMister& transport, const Modeline& mode, std::string& error)
++    {
++        if (!ready_) return false;
++        bool valid = false;
++        std::jthread handshake([&] {
++            std::array<std::uint8_t, 2048> bytes{};
++            auto size = receive(bytes);
++            // A normal close may precede a reconnect on this test socket.
++            if (size == 1 && bytes[0] == 1) size = receive(bytes);
++            if (size != 5 || bytes[0] != 2 || bytes[1] != 1) return;
++            std::array<std::uint8_t, 13> ack{};
++            ack[12] = 0xc7;
++            valid = sendto(socket_, ack.data(), ack.size(), 0,
++                reinterpret_cast<sockaddr*>(&peer_), sizeof(peer_)) == 13;
++        });
++        const bool connected = transport.connect("127.0.0.1", false, mode, error, ntohs(address_.sin_port));
++        handshake.join();
++        if (!connected || !valid) return false;
++        std::array<std::uint8_t, 2048> bytes{};
++        return receive(bytes) == 26 && bytes[0] == 3;
++    }
++    ssize_t receive(std::span<std::uint8_t> bytes)
++    {
++        return receivePacket(socket_, bytes, peer_);
++    }
++    bool field(const std::vector<std::uint8_t>& source, std::uint32_t number,
++        FieldParity parity, bool delta, std::size_t transmitted,
++        std::vector<std::uint8_t>& previous)
++    {
++        std::array<std::uint8_t, 2048> bytes{};
++        const auto headerSize = receive(bytes);
++        std::uint32_t frame = 0, size = 0;
++        std::memcpy(&frame, bytes.data() + 1, sizeof(frame));
++        std::memcpy(&size, bytes.data() + 8, sizeof(size));
++        if (headerSize != (delta ? 13 : 12) || bytes[0] != 7 ||
++            bytes[5] != static_cast<std::uint8_t>(parity) || frame != number ||
++            size != transmitted || (delta && bytes[12] != 1)) return false;
++        std::vector<std::uint8_t> payload;
++        while (payload.size() < size) {
++            const auto received = receive(bytes);
++            if (received != static_cast<ssize_t>(std::min<std::size_t>(1472, size - payload.size()))) {
++                return false;
++            }
++            payload.insert(payload.end(), bytes.begin(), bytes.begin() + received);
++        }
++        auto raw = inflate(payload, source.size());
++        if (raw.size() != source.size()) return false;
++        if (delta) {
++            if (previous.size() != raw.size()) return false;
++            reconstruct(raw, previous);
++        }
++        if (raw != source) return false;
++        previous = std::move(raw);
++        return true;
++    }
++private:
++    int socket_{-1};
++    bool ready_{};
++    sockaddr_in address_{};
++    sockaddr_in peer_{};
++};
++
++} // namespace
++
++void GroovyMisterTest::deltaUdpRoundTrip_data()
++{
++    QTest::addColumn<bool>("interlaced");
++    QTest::newRow("progressive") << false;
++    QTest::newRow("interlaced") << true;
++}
++
++void GroovyMisterTest::deltaUdpRoundTrip()
++{
++    QFETCH(bool, interlaced);
++    auto mode = testMode;
++    mode.interlaced = interlaced;
++    if (interlaced) mode.vActive *= 2;
++    LocalReceiver receiver;
++    GroovyMister transport;
++    std::string error;
++    QVERIFY2(receiver.connectTransport(transport, mode, error), error.c_str());
++    std::array<std::vector<std::uint8_t>, 2> source{
++        randomField(mode.payloadBytes(), 0x12345678), randomField(mode.payloadBytes(), 0x87654321)};
++    std::array<std::vector<std::uint8_t>, 2> previous;
++    const unsigned parities = interlaced ? 2 : 1;
++    for (unsigned i = 0; i < 32 * parities; ++i) {
++        const unsigned slot = i % parities;
++        const auto parity = static_cast<FieldParity>(slot);
++        ++source[slot][i];
++        const auto result = transport.sendFrame(source[slot], i + 1, parity);
++        QCOMPARE(result.status, VideoSubmitStatus::Sent);
++        const bool expectedDelta = (i / parities) % GroovyVideoEncoder::kFullRefreshInterval != 0;
++        QVERIFY(receiver.field(source[slot], i + 1, parity, expectedDelta,
++            result.timings.transmittedBytes, previous[slot]));
++    }
++    QCOMPARE(transport.diagnostics().fullLz4Sends, std::uint64_t{2 * parities});
++    QCOMPARE(transport.diagnostics().deltaLz4Sends, std::uint64_t{30 * parities});
++    QCOMPARE(transport.diagnostics().forcedFullResyncs, std::uint64_t{parities});
++    // No frame ACKs were sent: delta history is successful-send based.
++    QCOMPARE(transport.status().frameEcho, std::uint32_t{0});
++
++    const auto saved = source[0];
++    ++source[0][100];
++    holdQueue = true;
++    const auto dropped = transport.sendFrame(source[0], 100, field0);
++    holdQueue = false;
++    QCOMPARE(dropped.status, VideoSubmitStatus::DroppedBeforeCommand);
++    source[0] = saved;
++    ++source[0][101];
++    auto result = transport.sendFrame(source[0], 101, field0);
++    QCOMPARE(result.status, VideoSubmitStatus::Sent);
++    QVERIFY(receiver.field(source[0], 101, field0, true,
++        result.timings.transmittedBytes, previous[0]));
++
++    // Reconnect and a mode switch with identical byte size both force full.
++    transport.close();
++    mode.hActive *= 2;
++    mode.vActive /= 2;
++    QVERIFY2(receiver.connectTransport(transport, mode, error), error.c_str());
++    for (unsigned slot = 0; slot < parities; ++slot) {
++        const auto parity = static_cast<FieldParity>(slot);
++        result = transport.sendFrame(source[slot], slot + 1, parity);
++        QCOMPARE(result.status, VideoSubmitStatus::Sent);
++        QVERIFY(receiver.field(source[slot], slot + 1, parity, false,
++            result.timings.transmittedBytes, previous[slot]));
++    }
++}
++
++void GroovyMisterTest::failedSubmissionInvalidatesHistory()
++{
++    auto mode = testMode;
++    mode.interlaced = true;
++    mode.vActive *= 2;
++    LocalReceiver receiver;
++    GroovyMister transport;
++    std::string error;
++    std::array<std::vector<std::uint8_t>, 2> previous;
++    const auto base = randomField(mode.payloadBytes(), 0x12345678);
++    const auto candidate = randomField(mode.payloadBytes(), 0x87654321);
++
++    // Failure before header, after header, and after the first payload chunk.
++    for (int scenario : {-1, 0, 1}) {
++        QVERIFY2(receiver.connectTransport(transport, mode, error), error.c_str());
++        for (auto field : {field0, field1}) {
++            const auto result = transport.sendFrame(base, 1, field);
++            QCOMPARE(result.status, VideoSubmitStatus::Sent);
++            QVERIFY(receiver.field(base, 1, field, false, result.timings.transmittedBytes,
++                previous[static_cast<unsigned>(field)]));
++        }
++        const auto invalidations = transport.diagnostics().historyInvalidations;
++        payloadBudget = scenario;
++        failCommand = scenario == -1;
++        const auto result = transport.sendFrame(candidate, 2, field0);
++        payloadBudget = -1;
++        failCommand = false;
++        QCOMPARE(result.status, VideoSubmitStatus::Fatal);
++        QCOMPARE(transport.diagnostics().historyInvalidations, invalidations + 1);
++        QCOMPARE(transport.diagnostics().fullLz4Sends, std::uint64_t{2});
++        QCOMPARE(transport.diagnostics().deltaLz4Sends, std::uint64_t{0});
++        QCOMPARE(transport.sendFrame(base, 3, field1).status, VideoSubmitStatus::Fatal);
++        if (scenario >= 0) {
++            std::array<std::uint8_t, 2048> bytes{};
++            QCOMPARE(receiver.receive(bytes), ssize_t{12});
++            if (scenario == 1) QCOMPARE(receiver.receive(bytes), ssize_t{1472});
++        }
++        // Broken streams cannot resume until reconnect; neither parity can
++        // retain a candidate or use the previous connection's delta base.
++        QVERIFY2(receiver.connectTransport(transport, mode, error), error.c_str());
++        for (auto field : {field0, field1}) {
++            const auto retry = transport.sendFrame(base, 1, field);
++            QCOMPARE(retry.status, VideoSubmitStatus::Sent);
++            QVERIFY(receiver.field(base, 1, field, false, retry.timings.transmittedBytes,
++                previous[static_cast<unsigned>(field)]));
++        }
++        transport.close();
++    }
++}
++
++
+ QTEST_APPLESS_MAIN(GroovyMisterTest)
+ 
+ #include "GroovyMisterTest.moc"

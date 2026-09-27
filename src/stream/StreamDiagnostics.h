@@ -21,6 +21,12 @@ struct VideoDiagnostics {
     std::uint32_t averagePayloadBytes{};
     std::uint16_t deliveryReserveLines{};
     std::uint32_t intervalDroppedFrames{};
+    std::uint64_t fullLz4Sends{};
+    std::uint64_t deltaLz4Sends{};
+    std::uint64_t deltaContentRejections{};
+    std::uint64_t deltaSizeRejections{};
+    std::uint64_t forcedFullResyncs{};
+    std::uint64_t historyInvalidations{};
 };
 
 struct AudioDiagnostics {

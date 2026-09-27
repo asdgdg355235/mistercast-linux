@@ -29,6 +29,14 @@ inline constexpr std::size_t kStatusPacketSize = 13;
 using InitCommand = std::array<std::uint8_t, 5>;
 using ModeSwitchCommand = std::array<std::uint8_t, 26>;
 using BlitCommand = std::array<std::uint8_t, 12>;
+struct CompressedBlitCommand {
+    std::array<std::uint8_t, 13> storage{};
+    std::size_t length{};
+    [[nodiscard]] std::span<const std::uint8_t> bytes() const
+    {
+        return std::span(storage).first(length);
+    }
+};
 using AudioCommand = std::array<std::uint8_t, 3>;
 using StatusPacket = std::array<std::uint8_t, kStatusPacketSize>;
 
@@ -39,6 +47,9 @@ using StatusPacket = std::array<std::uint8_t, kStatusPacketSize>;
     FieldParity field,
     std::uint16_t syncLine,
     std::uint32_t compressedSize);
+[[nodiscard]] CompressedBlitCommand makeBlitCommand(
+    std::uint32_t frameNumber, FieldParity field, std::uint16_t syncLine,
+    std::uint32_t compressedSize, bool delta);
 [[nodiscard]] AudioCommand makeAudioCommand(std::uint16_t payloadBytes);
 [[nodiscard]] FpgaStatus decodeStatus(
     std::span<const std::uint8_t, kStatusPacketSize> packet);

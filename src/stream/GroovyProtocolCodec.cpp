@@ -1,6 +1,7 @@
 #include "stream/GroovyProtocolCodec.h"
 
 #include <cstring>
+#include <algorithm>
 #include <type_traits>
 
 namespace mistercast::GroovyProtocolCodec {
@@ -72,6 +73,18 @@ BlitCommand makeBlitCommand(
     write(packet, 8, compressedSize);
 
     return packet;
+}
+
+CompressedBlitCommand makeBlitCommand(
+    std::uint32_t frameNumber, FieldParity field, std::uint16_t syncLine,
+    std::uint32_t compressedSize, bool delta)
+{
+    const auto full = makeBlitCommand(frameNumber, field, syncLine, compressedSize);
+    CompressedBlitCommand command{};
+    std::copy(full.begin(), full.end(), command.storage.begin());
+    command.storage[12] = delta ? 0x01 : 0x00;
+    command.length = delta ? 13 : 12;
+    return command;
 }
 
 AudioCommand makeAudioCommand(std::uint16_t payloadBytes)

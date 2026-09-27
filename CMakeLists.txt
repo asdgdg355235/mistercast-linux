@@ -35,6 +35,8 @@ add_library(mistercast_core
     src/core/StereoSampleRing.h
     src/stream/GroovyMister.cpp
     src/stream/GroovyMister.h
+    src/stream/GroovyVideoEncoder.cpp
+    src/stream/GroovyVideoEncoder.h
     src/stream/GroovyProtocolCodec.cpp
     src/stream/GroovyProtocolCodec.h
     src/stream/StreamTimingPolicy.cpp
@@ -100,7 +102,9 @@ if(BUILD_TESTING)
 
     add_executable(groovy_mister_test tests/GroovyMisterTest.cpp)
     set_target_properties(groovy_mister_test PROPERTIES AUTOMOC ON)
-    target_link_libraries(groovy_mister_test PRIVATE mistercast_core Qt6::Test)
+    target_link_libraries(groovy_mister_test PRIVATE mistercast_core Qt6::Test PkgConfig::LZ4)
+    target_link_options(groovy_mister_test PRIVATE
+        -Wl,--wrap=sendmmsg -Wl,--wrap=send -Wl,--wrap=ioctl)
     target_compile_options(groovy_mister_test PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME groovy_mister COMMAND groovy_mister_test)
     set_tests_properties(groovy_mister PROPERTIES TIMEOUT 10 LABELS integration)

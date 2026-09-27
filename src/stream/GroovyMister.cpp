@@ -7,8 +7,6 @@
 #include "core/FrameSequence.h"
 #include "stream/StreamTimingPolicy.h"
 
-#include <lz4.h>
-
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -36,8 +34,7 @@ std::string socketError(const char* operation)
 } // namespace
 
 GroovyMister::GroovyMister()
-    : compressed_(static_cast<std::size_t>(LZ4_compressBound(kMaximumFrameBytes)))
-    , messages_(kMaxPayloadPackets)
+    : messages_(kMaxPayloadPackets)
     , vectors_(kMaxPayloadPackets)
 {
 }
@@ -164,6 +161,13 @@ void GroovyMister::close()
     consumedStatusGeneration_ = 0;
     lastFrameNumber_ = 0;
     diagnostics_ = {};
+    invalidateVideoHistory();
+}
+
+void GroovyMister::invalidateVideoHistory()
+{
+    videoEncoder_.invalidate();
+    ++diagnostics_.historyInvalidations;
 }
 
 VideoSubmitResult GroovyMister::sendFrame(
@@ -173,33 +177,34 @@ VideoSubmitResult GroovyMister::sendFrame(
 {
     VideoSubmitResult result;
 
-    if (!connected_) {
+    if (!connected_ || streamBroken_) {
         result.error = "Groovy_MiSTer transport is not connected";
         return result;
     }
 
-    if (frame.size() != mode_.payloadBytes() ||
+    if (frame.empty() || frame.size() > kMaximumFrameBytes ||
+        static_cast<unsigned>(field) > 1 || frame.size() != mode_.payloadBytes() ||
         (!mode_.interlaced && field != FieldParity::Field0OddSourceLines)) {
+        invalidateVideoHistory();
         result.error = "Frame payload does not match the selected modeline";
         return result;
     }
 
     const auto compressionStart = std::chrono::steady_clock::now();
-    const int compressedSize = LZ4_compress_default(
-        reinterpret_cast<const char*>(frame.data()),
-        compressed_.data(),
-        static_cast<int>(frame.size()),
-        static_cast<int>(compressed_.size()));
+    const auto encoded = videoEncoder_.prepare(frame, mode_, field);
     const auto compressionEnd = std::chrono::steady_clock::now();
+    result.timings.compression = compressionEnd - compressionStart;
+    diagnostics_.deltaContentRejections +=
+        encoded.rejection == GroovyVideoEncoder::Rejection::Content;
+    diagnostics_.deltaSizeRejections +=
+        encoded.rejection == GroovyVideoEncoder::Rejection::Size;
 
-    if (compressedSize <= 0) {
+    if (encoded.payload.empty()) {
+        invalidateVideoHistory();
         result.error = "Unable to compress frame for the negotiated LZ4 stream";
         return result;
     }
-
-    const auto payload = std::span<const std::uint8_t>(
-        reinterpret_cast<const std::uint8_t*>(compressed_.data()),
-        static_cast<std::size_t>(compressedSize));
+    const auto payload = encoded.payload;
 
     const auto syncLine = calculateDeliverySyncLine(
         mode_,
@@ -211,31 +216,41 @@ VideoSubmitResult GroovyMister::sendFrame(
         deliveryMargin_.minimumLines());
     const auto size = static_cast<std::uint32_t>(payload.size());
     const auto command = GroovyProtocolCodec::makeBlitCommand(
-        frameNumber, field, syncLine, size);
+        frameNumber, field, syncLine, size, encoded.delta);
 
     if (!waitForSendCapacity(
             result.error, result.timings.capacityWait, std::chrono::milliseconds(0))) {
         result.status = VideoSubmitStatus::DroppedBeforeCommand;
-        result.timings.compression = compressionEnd - compressionStart;
         return result;
     }
 
-    if (!sendCommand(command, result.error)) {
+    if (!sendCommand(command.bytes(), result.error)) {
+        invalidateVideoHistory();
         return result;
     }
 
     const auto sendStart = std::chrono::steady_clock::now();
     if (!sendPayload(payload, result.error)) {
+        invalidateVideoHistory();
+        streamBroken_ = true;
         return result;
     }
 
     const auto sendEnd = std::chrono::steady_clock::now();
 
+    // Receiver ACK is sent at BLIT header receipt, before reconstruction.
+    // Successful UDP submission is the base policy, bounded by full refreshes.
+    const auto historyStart = std::chrono::steady_clock::now();
+    videoEncoder_.commit(frame, field, encoded);
+    result.timings.compression += std::chrono::steady_clock::now() - historyStart;
+    diagnostics_.fullLz4Sends += !encoded.delta;
+    diagnostics_.deltaLz4Sends += encoded.delta;
+    diagnostics_.forcedFullResyncs += encoded.forcedFull;
+
     lastStreamDuration_ = sendEnd - sendStart;
     lastFrameNumber_ = frameNumber;
 
     result.status = VideoSubmitStatus::Sent;
-    result.timings.compression = compressionEnd - compressionStart;
     result.timings.socketSubmission = lastStreamDuration_;
     result.timings.transmittedBytes = payload.size();
     result.timings.deliveryReserveLines = static_cast<std::uint16_t>(mode_.vTotal - syncLine);
@@ -273,6 +288,7 @@ bool GroovyMister::sendAudio(std::span<const std::int16_t> samples, std::string&
     const auto protocolSize = static_cast<std::uint16_t>(byteSize);
     const auto command = GroovyProtocolCodec::makeAudioCommand(protocolSize);
     if (!sendCommand(command, error)) {
+        invalidateVideoHistory();
         return false;
     }
 
@@ -280,9 +296,13 @@ bool GroovyMister::sendAudio(std::span<const std::int16_t> samples, std::string&
         std::span<const std::uint8_t>(
             reinterpret_cast<const std::uint8_t*>(samples.data()), samples.size_bytes()),
         error);
-    
-        if (sent) {
+
+    if (sent) {
         ++diagnostics_.audioPacketsSent;
+    } else {
+        // Audio shares the unframed payload stream with video.
+        invalidateVideoHistory();
+        streamBroken_ = true;
     }
 
     return sent;
@@ -372,6 +392,10 @@ void GroovyMister::pollStatus()
 
 bool GroovyMister::sendCommand(std::span<const std::uint8_t> command, std::string& error)
 {
+    if (streamBroken_) {
+        error = "Groovy_MiSTer payload stream is broken; reconnect required";
+        return false;
+    }
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(10);
 
     for (;;) {

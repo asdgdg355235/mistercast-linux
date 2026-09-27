@@ -271,6 +271,7 @@ void StreamSession::run(std::stop_token stopToken)
                         percentile * static_cast<double>(count - 1)));
             };
 
+            const auto& transportDiagnostics = transport.diagnostics();
             emit videoDiagnostics(VideoDiagnostics{
                 .frameNumber = frameNumber,
                 .capturedFrames = capturedFrames,
@@ -300,10 +301,15 @@ void StreamSession::run(std::stop_token stopToken)
                     static_cast<std::uint32_t>(totalPayload / statisticFrames),
                 .deliveryReserveLines = deliveryReserveLines,
                 .intervalDroppedFrames = droppedFrames,
+                .fullLz4Sends = transportDiagnostics.fullLz4Sends,
+                .deltaLz4Sends = transportDiagnostics.deltaLz4Sends,
+                .deltaContentRejections = transportDiagnostics.deltaContentRejections,
+                .deltaSizeRejections = transportDiagnostics.deltaSizeRejections,
+                .forcedFullResyncs = transportDiagnostics.forcedFullResyncs,
+                .historyInvalidations = transportDiagnostics.historyInvalidations,
             });
 
             const auto audioCaptureDiagnostics = audioCapture_.diagnostics();
-            const auto& transportDiagnostics = transport.diagnostics();
 
             emit audioDiagnostics(AudioDiagnostics{
                 .requestedPackets = transportDiagnostics.audioPacketsRequested,

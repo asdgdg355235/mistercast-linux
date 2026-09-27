@@ -3,6 +3,7 @@
 #include "core/Modeline.h"
 #include "core/StreamTypes.h"
 #include "stream/GroovyProtocolCodec.h"
+#include "stream/GroovyVideoEncoder.h"
 #include "stream/StreamTimingPolicy.h"
 
 #include <chrono>
@@ -44,6 +45,12 @@ struct FrameCapacityResult {
 };
 
 struct TransportDiagnostics {
+    std::uint64_t fullLz4Sends{};
+    std::uint64_t deltaLz4Sends{};
+    std::uint64_t deltaContentRejections{};
+    std::uint64_t deltaSizeRejections{};
+    std::uint64_t forcedFullResyncs{};
+    std::uint64_t historyInvalidations{};
     std::uint64_t audioPacketsRequested{};
     std::uint64_t audioPacketsSent{};
     std::uint64_t audioPacketsCoreDisabled{};
@@ -101,6 +108,7 @@ private:
         std::chrono::milliseconds maximumWait);
     
     int sampleSocketQueue();
+    void invalidateVideoHistory();
     void pollStatus();
     std::uint64_t receiveStatus(std::chrono::milliseconds timeout);
     bool parseStatus(
@@ -114,7 +122,7 @@ private:
     FpgaStatus status_{};
     Modeline mode_{kDefaultModeline};
     AdaptiveDeliveryMargin deliveryMargin_;
-    std::vector<char> compressed_;
+    GroovyVideoEncoder videoEncoder_;
     std::vector<mmsghdr> messages_;
     std::vector<iovec> vectors_;
 

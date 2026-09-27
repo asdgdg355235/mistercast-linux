@@ -203,7 +203,13 @@ MainWindow::MainWindow(QWidget* parent)
                     << " submit_us=" << snapshot.averageSubmissionUs
                     << " payload_bytes=" << snapshot.averagePayloadBytes
                     << " reserve_lines=" << snapshot.deliveryReserveLines
-                    << " drops=" << snapshot.intervalDroppedFrames;
+                    << " drops=" << snapshot.intervalDroppedFrames
+                    << " full_lz4=" << snapshot.fullLz4Sends
+                    << " delta_lz4=" << snapshot.deltaLz4Sends
+                    << " delta_content_rejected=" << snapshot.deltaContentRejections
+                    << " delta_size_rejected=" << snapshot.deltaSizeRejections
+                    << " full_resyncs=" << snapshot.forcedFullResyncs
+                    << " history_invalidations=" << snapshot.historyInvalidations;
             }
             latencyStatus_->setText(
                 QStringLiteral("Frame %1  |  captured/reused %2/%3  |  new-frame dequeue age p50/p95/max %4/%5/%6 ms  |  capture process/ready %7/%8 us  |  LZ4/queue/submit %9/%10/%11 us  |  %12 B  |  reserve %13 lines  |  interval drops %14")

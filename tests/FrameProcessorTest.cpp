@@ -281,6 +281,17 @@ void CoreTest::protocolCodecGoldens()
             0x5060,
             0x10203040),
         expectedBlit);
+    const auto full = GroovyProtocolCodec::makeBlitCommand(
+        0x01020304, FieldParity::Field1EvenSourceLines, 0x5060, 0x10203040, false);
+    QCOMPARE(full.bytes().size(), std::size_t{12});
+    QVERIFY(std::equal(full.bytes().begin(), full.bytes().end(), expectedBlit.begin()));
+    const auto delta = GroovyProtocolCodec::makeBlitCommand(
+        0x01020304, FieldParity::Field1EvenSourceLines, 0x5060, 0x10203040, true);
+    const std::array<std::uint8_t, 13> expectedDelta{
+        0x07, 0x04, 0x03, 0x02, 0x01, 0x01,
+        0x60, 0x50, 0x40, 0x30, 0x20, 0x10, 0x01};
+    QCOMPARE(delta.bytes().size(), expectedDelta.size());
+    QVERIFY(std::equal(delta.bytes().begin(), delta.bytes().end(), expectedDelta.begin()));
     QCOMPARE(
         GroovyProtocolCodec::makeAudioCommand(0x1234),
         (GroovyProtocolCodec::AudioCommand{0x04, 0x34, 0x12}));
