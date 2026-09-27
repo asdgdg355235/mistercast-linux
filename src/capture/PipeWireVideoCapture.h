@@ -29,7 +29,7 @@ public:
         std::uint64_t pipeWireSerial,
         QString& error);
     void stop();
-    void setCropSettings(CropSettings settings);
+    void setFramingSettings(FramingSettings settings);
     ModeEpoch setOutputMode(const Modeline& modeline);
 
 signals:
@@ -56,8 +56,8 @@ private:
     pw_stream* stream_{};
     spa_hook streamListener_{};
     spa_video_info_raw format_{};
-    CropSettings crop_{};
-    std::mutex cropMutex_;
+    FramingSettings framing_{};
+    std::mutex framingMutex_;
     Modeline outputMode_{kDefaultModeline};
     mutable std::mutex modeMutex_;
     ModeEpoch modeEpoch_{1};

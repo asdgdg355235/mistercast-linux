@@ -1,0 +1,1237 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index e030f81..a50333e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -29,6 +29,8 @@ add_library(mistercast_core
+     src/core/FrameMailbox.h
+     src/core/FrameProcessor.cpp
+     src/core/FrameProcessor.h
++    src/core/Scaler.cpp
++    src/core/Scaler.h
+     src/core/FrameSequence.h
+     src/core/StreamTypes.h
+     src/core/StereoSampleRing.cpp
+@@ -70,6 +72,8 @@ add_executable(mistercast
+     src/stream/StreamSession.h
+     src/ui/MainWindow.cpp
+     src/ui/MainWindow.h
++    src/ui/ScalingSelector.cpp
++    src/ui/ScalingSelector.h
+     src/main.cpp
+ )
+ 
+@@ -91,6 +95,13 @@ qt_add_resources(mistercast "modelines"
+ )
+ 
+ if(BUILD_TESTING)
++    add_executable(scaler_test tests/ScalerTest.cpp src/ui/ScalingSelector.cpp)
++    set_target_properties(scaler_test PROPERTIES AUTOMOC ON)
++    target_link_libraries(scaler_test PRIVATE mistercast_core Qt6::Test Qt6::Widgets)
++    target_compile_options(scaler_test PRIVATE -Wall -Wextra -Wpedantic)
++    add_test(NAME scaler COMMAND scaler_test)
++    set_tests_properties(scaler PROPERTIES TIMEOUT 10 LABELS unit ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
++
+     add_executable(frame_processor_test tests/FrameProcessorTest.cpp)
+     set_target_properties(frame_processor_test PROPERTIES AUTOMOC ON)
+     target_link_libraries(frame_processor_test PRIVATE mistercast_core Qt6::Test)
+diff --git a/README.md b/README.md
+index 55aeedc..cef6114 100644
+--- a/README.md
++++ b/README.md
+@@ -52,7 +52,7 @@ Choose the CRT output mode before streaming. On first launch, the bundled preset
+ 
+ Interlaced modes alternate odd and even source lines into field-sized network payloads and synchronize the field phase with MiSTer status acknowledgements. Timing values shown in the GUI are read-only and come directly from the selected modeline.
+ 
+-The source is center-cropped to 4:3 by default. Alignment, offsets, and rotation can be changed without restarting capture. The streaming path retains only the newest frame; it never queues stale video to improve apparent smoothness.
++The source is center-cropped to 4:3 by default. The **Framing** group provides alignment, offsets, rotation, & a **Scaling** selector. **Nearest** remains the default & preserves hard pixel edges. **Bilinear** interpolates between neighboring pixel centers. **Area** averages pixel coverage when shrinking & uses bilinear interpolation on enlarging axes. Framing changes apply to subsequent captured frames without restarting capture or streaming. The selected scaler is saved between launches & also applies to the temporary frame shown during output-mode changes. The streaming path retains only the newest frame; it never queues stale video to improve apparent smoothness.
+ 
+ Network audio must also be enabled in the Groovy_MiSTer core OSD. The GUI warns if MiSTer acknowledgements report audio disabled.
+ 
+diff --git a/src/app/StreamingCoordinator.cpp b/src/app/StreamingCoordinator.cpp
+index c135b6b..a1faf5b 100644
+--- a/src/app/StreamingCoordinator.cpp
++++ b/src/app/StreamingCoordinator.cpp
+@@ -169,9 +169,9 @@ void StreamingCoordinator::setOutputMode(const Modeline& modeline)
+     modeEpoch_ = videoCapture_.setOutputMode(modeline);
+ }
+ 
+-void StreamingCoordinator::setCropSettings(CropSettings settings)
++void StreamingCoordinator::setFramingSettings(FramingSettings settings)
+ {
+-    videoCapture_.setCropSettings(settings);
++    videoCapture_.setFramingSettings(settings);
+ }
+ 
+ } // namespace mistercast
+diff --git a/src/app/StreamingCoordinator.h b/src/app/StreamingCoordinator.h
+index fb24be2..01a7291 100644
+--- a/src/app/StreamingCoordinator.h
++++ b/src/app/StreamingCoordinator.h
+@@ -28,7 +28,7 @@ public:
+     void stopStreaming();
+     void shutdown();
+     void setOutputMode(const Modeline& modeline);
+-    void setCropSettings(CropSettings settings);
++    void setFramingSettings(FramingSettings settings);
+ 
+     [[nodiscard]] bool sourceReady() const { return sourceReady_; }
+     [[nodiscard]] bool streaming() const { return controller_.running(); }
+diff --git a/src/capture/PipeWireVideoCapture.cpp b/src/capture/PipeWireVideoCapture.cpp
+index c9db98c..875ad33 100644
+--- a/src/capture/PipeWireVideoCapture.cpp
++++ b/src/capture/PipeWireVideoCapture.cpp
+@@ -217,14 +217,19 @@ void PipeWireVideoCapture::stop()
+     }
+ }
+ 
+-void PipeWireVideoCapture::setCropSettings(CropSettings settings)
++void PipeWireVideoCapture::setFramingSettings(FramingSettings settings)
+ {
+-    std::lock_guard lock(cropMutex_);
+-    crop_ = settings;
++    std::lock_guard lock(framingMutex_);
++    framing_ = settings;
+ }
+ 
+ ModeEpoch PipeWireVideoCapture::setOutputMode(const Modeline& modeline)
+ {
++    ScalingAlgorithm scaling;
++    {
++        std::lock_guard lock(framingMutex_);
++        scaling = framing_.scaling;
++    }
+     ModeEpoch modeEpoch;
+     {
+         std::lock_guard lock(modeMutex_);
+@@ -257,7 +262,8 @@ ModeEpoch PipeWireVideoCapture::setOutputMode(const Modeline& modeline)
+                 cachedConvertedHeight_,
+                 destination,
+                 modeline.hActive,
+-                modeline.vActive)) {
++                modeline.vActive,
++                scaling)) {
+             convertedWidth_ = modeline.hActive;
+             convertedHeight_ = modeline.vActive;
+             convertedFrameIsSynthetic_ = true;
+@@ -495,10 +501,10 @@ void PipeWireVideoCapture::processFrame()
+         pixelFormatValue,
+     };
+ 
+-    CropSettings crop;
++    FramingSettings framing;
+     {
+-        std::lock_guard lock(cropMutex_);
+-        crop = crop_;
++        std::lock_guard lock(framingMutex_);
++        framing = framing_;
+     }
+     
+     Modeline mode;
+@@ -520,7 +526,7 @@ void PipeWireVideoCapture::processFrame()
+         }
+ 
+         if (currentMode && FrameProcessor::convertToBgr(
+-                source, destination, mode.hActive, mode.vActive, crop)) {
++                source, destination, mode.hActive, mode.vActive, framing)) {
+             convertedWidth_ = mode.hActive;
+             convertedHeight_ = mode.vActive;
+             hasConvertedFrame_ = true;
+diff --git a/src/capture/PipeWireVideoCapture.h b/src/capture/PipeWireVideoCapture.h
+index 15221e6..cad7f27 100644
+--- a/src/capture/PipeWireVideoCapture.h
++++ b/src/capture/PipeWireVideoCapture.h
+@@ -29,7 +29,7 @@ public:
+         std::uint64_t pipeWireSerial,
+         QString& error);
+     void stop();
+-    void setCropSettings(CropSettings settings);
++    void setFramingSettings(FramingSettings settings);
+     ModeEpoch setOutputMode(const Modeline& modeline);
+ 
+ signals:
+@@ -56,8 +56,8 @@ private:
+     pw_stream* stream_{};
+     spa_hook streamListener_{};
+     spa_video_info_raw format_{};
+-    CropSettings crop_{};
+-    std::mutex cropMutex_;
++    FramingSettings framing_{};
++    std::mutex framingMutex_;
+     Modeline outputMode_{kDefaultModeline};
+     mutable std::mutex modeMutex_;
+     ModeEpoch modeEpoch_{1};
+diff --git a/src/core/FrameProcessor.cpp b/src/core/FrameProcessor.cpp
+index aa91e48..3466d60 100644
+--- a/src/core/FrameProcessor.cpp
++++ b/src/core/FrameProcessor.cpp
+@@ -1,57 +1,15 @@
+ #include "core/FrameProcessor.h"
+ 
+-#include "core/Modeline.h"
+-
+ #include <algorithm>
+-#include <array>
+-#include <cstdint>
+ 
+ namespace mistercast {
+ 
+-std::uint32_t FrameProcessor::bytesPerPixel(PixelFormat format)
++bool FrameProcessor::prepareConversion(
++    const SourceFrame& source, std::uint16_t outputWidth,
++    std::uint16_t outputHeight, const FramingSettings& framing, ScalePlan& plan)
+ {
+-    switch (format) {
+-    case PixelFormat::Bgr:
+-    case PixelFormat::Rgb:
+-        return 3;
+-    case PixelFormat::Bgrx:
+-    case PixelFormat::Bgra:
+-    case PixelFormat::Rgbx:
+-    case PixelFormat::Rgba:
+-        return 4;
+-    }
+-    return 0;
+-}
+-
+-bool FrameProcessor::convertToBgr(
+-    const SourceFrame& source,
+-    std::span<std::uint8_t> destination,
+-    std::uint16_t outputWidth,
+-    std::uint16_t outputHeight,
+-    const CropSettings& crop)
+-{
+-    const auto bpp = bytesPerPixel(source.format);
+-    const std::size_t outputBytes = static_cast<std::size_t>(outputWidth) * outputHeight * 3;
+-    
+-    if (source.data == nullptr || source.width == 0 || source.height == 0 || bpp == 0 ||
+-        outputWidth == 0 || outputHeight == 0 || destination.size() < outputBytes) {
+-        return false;
+-    }
+-
+-    if (outputWidth > kMaximumActiveWidth || outputHeight > kMaximumActiveHeight) {
+-        return false;
+-    }
+-
+-    const std::int64_t minimumStride = static_cast<std::int64_t>(source.width) * bpp;
+-    const std::int64_t stride = source.stride == 0 ? minimumStride : source.stride;
+-    const std::int64_t absoluteStride = stride < 0 ? -stride : stride;
+-
+-    if (absoluteStride < minimumStride) {
+-        return false;
+-    }
+-
+-    const bool quarterTurn = crop.rotation == Rotation::Clockwise90 ||
+-        crop.rotation == Rotation::CounterClockwise90;
++    const bool quarterTurn = framing.rotation == Rotation::Clockwise90 ||
++        framing.rotation == Rotation::CounterClockwise90;
+     const std::uint32_t aspectWidth = quarterTurn ? 3 : 4;
+     const std::uint32_t aspectHeight = quarterTurn ? 4 : 3;
+ 
+@@ -67,12 +25,12 @@ bool FrameProcessor::convertToBgr(
+             static_cast<std::uint64_t>(source.width) * aspectHeight / aspectWidth);
+     }
+ 
+-    const auto horizontalSpace = static_cast<std::int32_t>(source.width - cropWidth);
+-    const auto verticalSpace = static_cast<std::int32_t>(source.height - cropHeight);
++    const auto horizontalSpace = static_cast<std::int64_t>(source.width - cropWidth);
++    const auto verticalSpace = static_cast<std::int64_t>(source.height - cropHeight);
+ 
+-    std::int32_t cropX = 0;
++    std::int64_t cropX = 0;
+     
+-    switch (crop.horizontal) {
++    switch (framing.horizontal) {
+     case HorizontalAlignment::Left:
+         break;
+     case HorizontalAlignment::Center:
+@@ -83,9 +41,9 @@ bool FrameProcessor::convertToBgr(
+         break;
+     }
+ 
+-    std::int32_t cropY = 0;
++    std::int64_t cropY = 0;
+     
+-    switch (crop.vertical) {
++    switch (framing.vertical) {
+     case VerticalAlignment::Top:
+         break;
+     case VerticalAlignment::Center:
+@@ -96,145 +54,40 @@ bool FrameProcessor::convertToBgr(
+         break;
+     }
+ 
+-    cropX = std::clamp(cropX + crop.offsetX, 0, horizontalSpace);
+-    cropY = std::clamp(cropY + crop.offsetY, 0, verticalSpace);
++    cropX = std::clamp(cropX + framing.offsetX, std::int64_t{0}, horizontalSpace);
++    cropY = std::clamp(cropY + framing.offsetY, std::int64_t{0}, verticalSpace);
+ 
+-    const bool sourceIsRgb = source.format == PixelFormat::Rgb ||
+-        source.format == PixelFormat::Rgbx || source.format == PixelFormat::Rgba;
+-
+-    if (crop.rotation == Rotation::None && source.format == PixelFormat::Bgr &&
+-        cropWidth == outputWidth && cropHeight == outputHeight) {
+-        const auto rowBytes = static_cast<std::size_t>(outputWidth) * 3;
+-        for (std::uint32_t y = 0; y < outputHeight; ++y) {
+-            const auto* sourceRow = source.data +
+-                static_cast<std::int64_t>(cropY + static_cast<std::int32_t>(y)) * stride +
+-                static_cast<std::size_t>(cropX) * 3;
+-            auto* destinationRow = destination.data() + static_cast<std::size_t>(y) * rowBytes;
+-            std::copy_n(sourceRow, rowBytes, destinationRow);
+-        }
+-        return true;
+-    }
+-
+-    std::array<std::uint32_t, kMaximumActiveWidth> sourceCoordinateByX{};
+-    std::array<std::uint32_t, kMaximumActiveHeight> sourceCoordinateByY{};
+-
+-    for (std::uint32_t x = 0; x < outputWidth; ++x) {
+-        switch (crop.rotation) {
+-        case Rotation::None:
+-            sourceCoordinateByX[x] = cropX + static_cast<std::uint32_t>(
+-                static_cast<std::uint64_t>(x) * cropWidth / outputWidth);
+-            break;
+-        case Rotation::Clockwise90:
+-            sourceCoordinateByX[x] = cropY + static_cast<std::uint32_t>(
+-                static_cast<std::uint64_t>(outputWidth - x - 1) * cropHeight /
+-                outputWidth);
+-            break;
+-        case Rotation::CounterClockwise90:
+-            sourceCoordinateByX[x] = cropY + static_cast<std::uint32_t>(
+-                static_cast<std::uint64_t>(x) * cropHeight / outputWidth);
+-            break;
+-        case Rotation::Flip180:
+-            sourceCoordinateByX[x] = cropX + static_cast<std::uint32_t>(
+-                static_cast<std::uint64_t>(outputWidth - x - 1) * cropWidth /
+-                outputWidth);
+-            break;
+-        }
+-    }
+-
+-    for (std::uint32_t y = 0; y < outputHeight; ++y) {
+-        switch (crop.rotation) {
+-        case Rotation::None:
+-            sourceCoordinateByY[y] = cropY + static_cast<std::uint32_t>(
+-                static_cast<std::uint64_t>(y) * cropHeight / outputHeight);
+-            break;
+-        case Rotation::Clockwise90:
+-            sourceCoordinateByY[y] = cropX + static_cast<std::uint32_t>(
+-                static_cast<std::uint64_t>(y) * cropWidth / outputHeight);
+-            break;
+-        case Rotation::CounterClockwise90:
+-            sourceCoordinateByY[y] = cropX + static_cast<std::uint32_t>(
+-                static_cast<std::uint64_t>(outputHeight - y - 1) * cropWidth /
+-                outputHeight);
+-            break;
+-        case Rotation::Flip180:
+-            sourceCoordinateByY[y] = cropY + static_cast<std::uint32_t>(
+-                static_cast<std::uint64_t>(outputHeight - y - 1) * cropHeight /
+-                outputHeight);
+-            break;
+-        }
+-    }
+-
+-    for (std::uint32_t y = 0; y < outputHeight; ++y) {
+-        auto* destinationRow = destination.data() +
+-            static_cast<std::size_t>(y) * outputWidth * 3;
+-
+-        for (std::uint32_t x = 0; x < outputWidth; ++x) {
+-            const bool quarterTurn = crop.rotation == Rotation::Clockwise90 ||
+-                crop.rotation == Rotation::CounterClockwise90;
+-            const auto sourceX = quarterTurn
+-                ? sourceCoordinateByY[y]
+-                : sourceCoordinateByX[x];
+-            const auto sourceY = quarterTurn
+-                ? sourceCoordinateByX[x]
+-                : sourceCoordinateByY[y];
+-            const auto* sourceRow = source.data + static_cast<std::int64_t>(sourceY) * stride;
+-            const auto* pixel = sourceRow + static_cast<std::size_t>(sourceX) * bpp;
+-            auto* output = destinationRow + static_cast<std::size_t>(x) * 3;
+-
+-            if (sourceIsRgb) {
+-                output[0] = pixel[2];
+-                output[1] = pixel[1];
+-                output[2] = pixel[0];
+-            } else {
+-                output[0] = pixel[0];
+-                output[1] = pixel[1];
+-                output[2] = pixel[2];
+-            }
+-        }
+-    }
++    return prepareScalePlan(source,
++        {static_cast<std::uint32_t>(cropX), static_cast<std::uint32_t>(cropY),
++         cropWidth, cropHeight, framing.rotation, outputWidth, outputHeight},
++        framing.scaling, plan);
++}
+ 
+-    return true;
++bool FrameProcessor::convertToBgr(
++    const SourceFrame& source, std::span<std::uint8_t> destination,
++    std::uint16_t outputWidth, std::uint16_t outputHeight,
++    const FramingSettings& framing)
++{
++    ScalePlan plan;
++    return prepareConversion(source, outputWidth, outputHeight, framing, plan) &&
++        scaleRows(plan, destination, 0, outputHeight);
+ }
+ 
+ bool FrameProcessor::resizeBgr(
+     std::span<const std::uint8_t> source,
+-    std::uint16_t sourceWidth,
+-    std::uint16_t sourceHeight,
++    std::uint16_t sourceWidth, std::uint16_t sourceHeight,
+     std::span<std::uint8_t> destination,
+-    std::uint16_t outputWidth,
+-    std::uint16_t outputHeight)
++    std::uint16_t outputWidth, std::uint16_t outputHeight,
++    ScalingAlgorithm scaling)
+ {
+-    const auto sourceBytes =
+-        static_cast<std::size_t>(sourceWidth) * sourceHeight * 3;
+-    const auto outputBytes =
+-        static_cast<std::size_t>(outputWidth) * outputHeight * 3;
+-        
+-    if (sourceWidth == 0 || sourceHeight == 0 || outputWidth == 0 ||
+-        outputHeight == 0 || source.size() < sourceBytes ||
+-        destination.size() < outputBytes) {
++    if (source.size() < static_cast<std::size_t>(sourceWidth) * sourceHeight * 3) {
+         return false;
+     }
+-
+-    for (std::uint32_t y = 0; y < outputHeight; ++y) {
+-        const auto sourceY = static_cast<std::uint32_t>(
+-            static_cast<std::uint64_t>(y) * sourceHeight / outputHeight);
+-
+-        for (std::uint32_t x = 0; x < outputWidth; ++x) {
+-            const auto sourceX = static_cast<std::uint32_t>(
+-                static_cast<std::uint64_t>(x) * sourceWidth / outputWidth);
+-            const auto sourceOffset =
+-                (static_cast<std::size_t>(sourceY) * sourceWidth + sourceX) * 3;
+-            const auto destinationOffset =
+-                (static_cast<std::size_t>(y) * outputWidth + x) * 3;
+-
+-            std::copy_n(
+-                source.begin() + static_cast<std::ptrdiff_t>(sourceOffset),
+-                3,
+-                destination.begin() +
+-                    static_cast<std::ptrdiff_t>(destinationOffset));
+-        }
+-    }
+-    return true;
++    ScalePlan plan;
++    const SourceFrame frame{source.data(), sourceWidth, sourceHeight, 0, PixelFormat::Bgr};
++    return prepareScalePlan(frame,
++        {0, 0, sourceWidth, sourceHeight, Rotation::None, outputWidth, outputHeight},
++        scaling, plan) && scaleRows(plan, destination, 0, outputHeight);
+ }
+ 
+ } // namespace mistercast
+diff --git a/src/core/FrameProcessor.h b/src/core/FrameProcessor.h
+index 1540e27..caa86be 100644
+--- a/src/core/FrameProcessor.h
++++ b/src/core/FrameProcessor.h
+@@ -1,5 +1,7 @@
+ #pragma once
+ 
++#include "core/Scaler.h"
++
+ #include <cstddef>
+ #include <cstdint>
+ #include <span>
+@@ -42,12 +44,13 @@ enum class Rotation {
+     Flip180,
+ };
+ 
+-struct CropSettings {
++struct FramingSettings {
+     HorizontalAlignment horizontal{HorizontalAlignment::Center};
+     VerticalAlignment vertical{VerticalAlignment::Center};
+     std::int32_t offsetX{};
+     std::int32_t offsetY{};
+     Rotation rotation{Rotation::None};
++    ScalingAlgorithm scaling{ScalingAlgorithm::Nearest};
+ };
+ 
+ class FrameProcessor {
+@@ -57,17 +60,19 @@ public:
+         std::span<std::uint8_t> destination,
+         std::uint16_t outputWidth,
+         std::uint16_t outputHeight,
+-        const CropSettings& crop = {});
++        const FramingSettings& framing = {});
+     static bool resizeBgr(
+         std::span<const std::uint8_t> source,
+         std::uint16_t sourceWidth,
+         std::uint16_t sourceHeight,
+         std::span<std::uint8_t> destination,
+         std::uint16_t outputWidth,
+-        std::uint16_t outputHeight);
++        std::uint16_t outputHeight,
++        ScalingAlgorithm scaling = ScalingAlgorithm::Nearest);
+ 
+-private:
+-    static std::uint32_t bytesPerPixel(PixelFormat format);
++    static bool prepareConversion(
++        const SourceFrame& source, std::uint16_t outputWidth,
++        std::uint16_t outputHeight, const FramingSettings& framing, ScalePlan& plan);
+ };
+ 
+ } // namespace mistercast
+diff --git a/src/core/Scaler.cpp b/src/core/Scaler.cpp
+new file mode 100644
+index 0000000..3fdd22c
+--- /dev/null
++++ b/src/core/Scaler.cpp
+@@ -0,0 +1,226 @@
++#include "core/Scaler.h"
++#include "core/FrameProcessor.h"
++
++#include <algorithm>
++#include <cmath>
++#include <limits>
++
++namespace mistercast {
++namespace {
++using detail::AxisSample;
++
++AxisSample nearest(std::uint32_t d, std::uint32_t source, std::uint32_t output)
++{
++    const auto index = static_cast<std::uint32_t>(std::uint64_t{d} * source / output);
++    return {index, index, 1, 0, 0, 1};
++}
++
++AxisSample bilinear(std::uint32_t d, std::uint32_t source, std::uint32_t output)
++{
++    // Pixel-center convention: (d + 0.5) * source / output - 0.5.
++    // Keep integer numerators until accumulation, including edge clamping.
++    const std::int64_t denominator = 2 * output;
++    const auto numerator = std::clamp<std::int64_t>(
++        (2 * std::int64_t{d} + 1) * source - output,
++        0, std::int64_t{source - 1} * denominator);
++    const auto first = static_cast<std::uint32_t>(numerator / denominator);
++    const auto fraction = numerator % denominator;
++    if (fraction == 0) {
++        return {first, first, 1, 0, 0, 1};
++    }
++    return {first, first + 1, static_cast<double>(denominator - fraction),
++            static_cast<double>(fraction), 0, static_cast<double>(denominator)};
++}
++
++AxisSample area(std::uint32_t d, std::uint32_t source, std::uint32_t output)
++{
++    if (source <= output) {
++        return bilinear(d, source, output);
++    }
++    // Footprint [d*source/output, (d+1)*source/output). Integer endpoints
++    // measured in 1/output units preserve fractional edge coverage exactly.
++    const auto start = std::uint64_t{d} * source;
++    const auto end = std::uint64_t{d + 1} * source;
++    const auto first = static_cast<std::uint32_t>(start / output);
++    const auto last = static_cast<std::uint32_t>((end - 1) / output);
++    return {first, last, static_cast<double>(std::uint64_t{first + 1} * output - start),
++            static_cast<double>(end - std::uint64_t{last} * output),
++            static_cast<double>(output), static_cast<double>(source)};
++}
++
++const std::uint8_t* pixel(const ScalePlan& plan, std::uint32_t x, std::uint32_t y)
++{
++    return plan.source + std::int64_t{x} * plan.xStep + std::int64_t{y} * plan.yStep;
++}
++
++void nearestRows(const ScalePlan& plan, std::span<std::uint8_t> destination,
++                 std::uint32_t firstRow, std::uint32_t endRow)
++{
++    const auto width = plan.geometry.outputWidth;
++    for (auto y = firstRow; y < endRow; ++y) {
++        auto* row = destination.data() + std::size_t{y} * width * 3;
++        for (std::uint32_t x = 0; x < width; ++x) {
++            const auto* p = pixel(plan, plan.x[x].first, plan.y[y].first);
++            row[x * 3] = p[plan.blue];
++            row[x * 3 + 1] = p[1];
++            row[x * 3 + 2] = p[plan.red];
++        }
++    }
++}
++
++double weight(const AxisSample& sample, std::uint32_t index)
++{
++    if (index == sample.first) return sample.firstWeight;
++    if (index == sample.last) return sample.lastWeight;
++    return sample.interiorWeight;
++}
++
++void weightedRows(const ScalePlan& plan, std::span<std::uint8_t> destination,
++                  std::uint32_t firstRow, std::uint32_t endRow)
++{
++    const auto width = plan.geometry.outputWidth;
++    for (auto y = firstRow; y < endRow; ++y) {
++        auto* row = destination.data() + std::size_t{y} * width * 3;
++        const auto& ys = plan.y[y];
++        for (std::uint32_t x = 0; x < width; ++x) {
++            const auto& xs = plan.x[x];
++            double b = 0, g = 0, r = 0;
++            for (auto sy = ys.first; sy <= ys.last; ++sy) {
++                const auto wy = weight(ys, sy);
++                const auto* p = pixel(plan, xs.first, sy);
++                for (auto sx = xs.first; sx <= xs.last; ++sx) {
++                    const auto w = weight(xs, sx) * wy;
++                    b += p[plan.blue] * w;
++                    g += p[1] * w;
++                    r += p[plan.red] * w;
++                    if (sx != xs.last) p += plan.xStep;
++                }
++            }
++            const auto denominator = xs.totalWeight * ys.totalWeight;
++            const auto rounded = [denominator](double value) {
++                return static_cast<std::uint8_t>(
++                    std::clamp(std::floor(value / denominator + 0.5), 0.0, 255.0));
++            };
++            row[x * 3] = rounded(b);
++            row[x * 3 + 1] = rounded(g);
++            row[x * 3 + 2] = rounded(r);
++        }
++    }
++}
++
++using AxisBuilder = AxisSample (*)(std::uint32_t, std::uint32_t, std::uint32_t);
++struct Registration {
++    ScalerDescriptor descriptor;
++    AxisBuilder axis;
++    ScalePlan::Kernel rows;
++};
++// The only registration list. UI descriptors are derived from these entries.
++constexpr std::array registrations{
++    Registration{{ScalingAlgorithm::Nearest, "nearest", "Nearest"}, nearest, nearestRows},
++    Registration{{ScalingAlgorithm::Bilinear, "bilinear", "Bilinear"}, bilinear, weightedRows},
++    Registration{{ScalingAlgorithm::Area, "area", "Area"}, area, weightedRows},
++};
++constexpr auto descriptors = [] {
++    std::array<ScalerDescriptor, registrations.size()> result{};
++    for (std::size_t i = 0; i < result.size(); ++i) result[i] = registrations[i].descriptor;
++    return result;
++}();
++}
++
++std::span<const ScalerDescriptor> availableScalers() { return descriptors; }
++
++const ScalerDescriptor& scalerDescriptor(ScalingAlgorithm algorithm)
++{
++    for (const auto& descriptor : descriptors) {
++        if (descriptor.algorithm == algorithm) return descriptor;
++    }
++    return descriptors.front();
++}
++
++std::optional<ScalingAlgorithm> scalingAlgorithmFromKey(std::string_view key)
++{
++    for (const auto& descriptor : descriptors) {
++        if (descriptor.key == key) return descriptor.algorithm;
++    }
++    return std::nullopt;
++}
++
++bool prepareScalePlan(const SourceFrame& source, const ScalingGeometry& geometry,
++                      ScalingAlgorithm algorithm, ScalePlan& plan)
++{
++    plan.kernel = nullptr;
++    const Registration* registration = nullptr;
++    for (const auto& entry : registrations) {
++        if (entry.descriptor.algorithm == algorithm) registration = &entry;
++    }
++    std::uint32_t bpp = 0;
++    switch (source.format) {
++    case PixelFormat::Bgr: case PixelFormat::Rgb: bpp = 3; break;
++    case PixelFormat::Bgrx: case PixelFormat::Bgra:
++    case PixelFormat::Rgbx: case PixelFormat::Rgba: bpp = 4; break;
++    }
++    if (!registration || !source.data || !bpp || !source.width || !source.height ||
++        !geometry.cropWidth || !geometry.cropHeight ||
++        !geometry.outputWidth || !geometry.outputHeight ||
++        geometry.outputWidth > kMaximumActiveWidth || geometry.outputHeight > kMaximumActiveHeight ||
++        geometry.cropWidth > source.width || geometry.cropHeight > source.height ||
++        geometry.cropX > source.width - geometry.cropWidth ||
++        geometry.cropY > source.height - geometry.cropHeight) return false;
++
++    const auto rowBytes = std::int64_t{source.width} * bpp;
++    const auto stride = source.stride == 0 ? rowBytes : source.stride;
++    const auto absStride = stride < 0 ? -stride : stride;
++    if (absStride < rowBytes ||
++        std::uint64_t{source.height - 1} >
++            (std::numeric_limits<std::ptrdiff_t>::max() - rowBytes) /
++                static_cast<std::uint64_t>(absStride)) return false;
++
++    bool quarterTurn = false, reverseX = false, reverseY = false;
++    switch (geometry.rotation) {
++    case Rotation::None: break;
++    case Rotation::Clockwise90: quarterTurn = true; reverseX = true; break;
++    case Rotation::CounterClockwise90: quarterTurn = true; reverseY = true; break;
++    case Rotation::Flip180: reverseX = true; reverseY = true; break;
++    default: return false;
++    }
++    plan.geometry = geometry;
++    plan.source = source.data + std::int64_t{geometry.cropY} * stride +
++        std::int64_t{geometry.cropX} * bpp;
++    plan.xStep = quarterTurn ? stride : bpp;
++    plan.yStep = quarterTurn ? bpp : stride;
++    const bool rgb = source.format == PixelFormat::Rgb || source.format == PixelFormat::Rgbx ||
++        source.format == PixelFormat::Rgba;
++    plan.blue = rgb ? 2 : 0;
++    plan.red = rgb ? 0 : 2;
++    plan.copyRows = geometry.rotation == Rotation::None && source.format == PixelFormat::Bgr &&
++        geometry.cropWidth == geometry.outputWidth && geometry.cropHeight == geometry.outputHeight;
++    // Reverse destination coordinates before sampling, preserving legacy
++    // nearest rounding for noninteger ratios in rotated frames.
++    for (std::uint32_t x = 0; x < geometry.outputWidth; ++x) {
++        plan.x[x] = registration->axis(reverseX ? geometry.outputWidth - x - 1 : x,
++            quarterTurn ? geometry.cropHeight : geometry.cropWidth, geometry.outputWidth);
++    }
++    for (std::uint32_t y = 0; y < geometry.outputHeight; ++y) {
++        plan.y[y] = registration->axis(reverseY ? geometry.outputHeight - y - 1 : y,
++            quarterTurn ? geometry.cropWidth : geometry.cropHeight, geometry.outputHeight);
++    }
++    plan.kernel = registration->rows;
++    return true;
++}
++
++bool scaleRows(const ScalePlan& plan, std::span<std::uint8_t> destination,
++               std::uint32_t firstRow, std::uint32_t endRow)
++{
++    const auto rowBytes = std::size_t{plan.geometry.outputWidth} * 3;
++    if (!plan.kernel || firstRow > endRow || endRow > plan.geometry.outputHeight ||
++        destination.size() < rowBytes * plan.geometry.outputHeight) return false;
++    if (plan.copyRows) {
++        for (auto y = firstRow; y < endRow; ++y) {
++            std::copy_n(pixel(plan, 0, y), rowBytes, destination.data() + y * rowBytes);
++        }
++    } else {
++        plan.kernel(plan, destination, firstRow, endRow);
++    }
++    return true;
++}
++} // namespace mistercast
+diff --git a/src/core/Scaler.h b/src/core/Scaler.h
+new file mode 100644
+index 0000000..ab62682
+--- /dev/null
++++ b/src/core/Scaler.h
+@@ -0,0 +1,67 @@
++#pragma once
++
++#include "core/Modeline.h"
++
++#include <array>
++#include <cstdint>
++#include <optional>
++#include <span>
++#include <string_view>
++
++namespace mistercast {
++
++enum class ScalingAlgorithm { Nearest, Bilinear, Area };
++
++struct ScalerDescriptor {
++    ScalingAlgorithm algorithm;
++    std::string_view key;
++    std::string_view displayName;
++};
++
++std::span<const ScalerDescriptor> availableScalers();
++const ScalerDescriptor& scalerDescriptor(ScalingAlgorithm algorithm);
++std::optional<ScalingAlgorithm> scalingAlgorithmFromKey(std::string_view key);
++
++struct SourceFrame;
++enum class Rotation;
++
++struct ScalingGeometry {
++    std::uint32_t cropX{}, cropY{}, cropWidth{}, cropHeight{};
++    Rotation rotation{};
++    std::uint16_t outputWidth{}, outputHeight{};
++};
++
++namespace detail {
++// Integer coverage weights. Interior pixels share one weight, so storage is
++// bounded by destination dimensions even for very large source footprints.
++struct AxisSample {
++    std::uint32_t first{}, last{};
++    double firstWeight{}, lastWeight{}, interiorWeight{}, totalWeight{};
++};
++}
++
++struct ScalePlan {
++    ScalingGeometry geometry{};
++    std::array<detail::AxisSample, kMaximumActiveWidth> x;
++    std::array<detail::AxisSample, kMaximumActiveHeight> y;
++    const std::uint8_t* source{};
++    std::int64_t xStep{}, yStep{};
++    std::uint32_t blue{}, red{};
++    bool copyRows{};
++    using Kernel = void (*)(const ScalePlan&, std::span<std::uint8_t>,
++                            std::uint32_t, std::uint32_t);
++    Kernel kernel{};
++};
++
++// SourceFrame::data addresses logical row zero, including for negative stride.
++// The caller owns source storage and must keep it alive and unchanged. After
++// preparation, share the plan read-only. Destination must not overlap source.
++bool prepareScalePlan(const SourceFrame& source, const ScalingGeometry& geometry,
++                      ScalingAlgorithm algorithm, ScalePlan& plan);
++
++// Destination is the full output buffer. Only [firstRow,endRow) is written;
++// disjoint row calls need no synchronization or execution ordering.
++bool scaleRows(const ScalePlan& plan, std::span<std::uint8_t> destination,
++               std::uint32_t firstRow, std::uint32_t endRow);
++
++} // namespace mistercast
+diff --git a/src/ui/MainWindow.cpp b/src/ui/MainWindow.cpp
+index 084a294..4ce0655 100644
+--- a/src/ui/MainWindow.cpp
++++ b/src/ui/MainWindow.cpp
+@@ -1,4 +1,5 @@
+ #include "ui/MainWindow.h"
++#include "ui/ScalingSelector.h"
+ 
+ #include "core/ModelineCatalog.h"
+ 
+@@ -84,6 +85,8 @@ MainWindow::MainWindow(QWidget* parent)
+     rotation_->addItems({QStringLiteral("None"), QStringLiteral("90 degrees clockwise"),
+                          QStringLiteral("90 degrees counter-clockwise"), QStringLiteral("180 degrees")});
+     rotation_->setCurrentIndex(settings.value(QStringLiteral("rotation"), 0).toInt());
++    scaling_ = new QComboBox(framingGroup);
++    populateScalingSelector(*scaling_, settings);
+     horizontalOffset_ = new QSpinBox(framingGroup);
+     horizontalOffset_->setRange(-4096, 4096);
+     horizontalOffset_->setValue(settings.value(QStringLiteral("horizontalOffset"), 0).toInt());
+@@ -93,6 +96,7 @@ MainWindow::MainWindow(QWidget* parent)
+     framingForm->addRow(QStringLiteral("Horizontal"), horizontalAlignment_);
+     framingForm->addRow(QStringLiteral("Vertical"), verticalAlignment_);
+     framingForm->addRow(QStringLiteral("Rotation"), rotation_);
++    framingForm->addRow(QStringLiteral("Scaling"), scaling_);
+     framingForm->addRow(QStringLiteral("Horizontal offset"), horizontalOffset_);
+     framingForm->addRow(QStringLiteral("Vertical offset"), verticalOffset_);
+     layout->addWidget(framingGroup);
+@@ -139,11 +143,12 @@ MainWindow::MainWindow(QWidget* parent)
+     });
+     connect(reloadModelinesButton_, &QPushButton::clicked, this,
+         [this] { reloadModelines(true); });
+-    connect(horizontalAlignment_, &QComboBox::currentIndexChanged, this, &MainWindow::updateCropSettings);
+-    connect(verticalAlignment_, &QComboBox::currentIndexChanged, this, &MainWindow::updateCropSettings);
+-    connect(rotation_, &QComboBox::currentIndexChanged, this, &MainWindow::updateCropSettings);
+-    connect(horizontalOffset_, &QSpinBox::valueChanged, this, &MainWindow::updateCropSettings);
+-    connect(verticalOffset_, &QSpinBox::valueChanged, this, &MainWindow::updateCropSettings);
++    connect(horizontalAlignment_, &QComboBox::currentIndexChanged, this, &MainWindow::updateFramingSettings);
++    connect(verticalAlignment_, &QComboBox::currentIndexChanged, this, &MainWindow::updateFramingSettings);
++    connect(rotation_, &QComboBox::currentIndexChanged, this, &MainWindow::updateFramingSettings);
++    connect(scaling_, &QComboBox::currentIndexChanged, this, &MainWindow::updateFramingSettings);
++    connect(horizontalOffset_, &QSpinBox::valueChanged, this, &MainWindow::updateFramingSettings);
++    connect(verticalOffset_, &QSpinBox::valueChanged, this, &MainWindow::updateFramingSettings);
+ 
+     connect(&streaming_, &StreamingCoordinator::sourceSelectionStarted, this,
+         [this] {
+@@ -284,7 +289,7 @@ MainWindow::MainWindow(QWidget* parent)
+         });
+ 
+     reloadModelines(false);
+-    updateCropSettings();
++    updateFramingSettings();
+     updateDiagnosticsVisibility();
+     updateControls();
+ }
+@@ -471,15 +476,18 @@ const Modeline& MainWindow::selectedModeline() const
+     return modelines_[static_cast<std::size_t>(index)];
+ }
+ 
+-void MainWindow::updateCropSettings()
++void MainWindow::updateFramingSettings()
+ {
+-    CropSettings settings;
++    FramingSettings settings;
+     settings.horizontal = static_cast<HorizontalAlignment>(horizontalAlignment_->currentIndex());
+     settings.vertical = static_cast<VerticalAlignment>(verticalAlignment_->currentIndex());
+     settings.rotation = static_cast<Rotation>(rotation_->currentIndex());
+     settings.offsetX = horizontalOffset_->value();
+     settings.offsetY = verticalOffset_->value();
+-    streaming_.setCropSettings(settings);
++    settings.scaling = selectedScalingAlgorithm(*scaling_);
++    QSettings persistent;
++    saveScalingSelection(*scaling_, persistent);
++    streaming_.setFramingSettings(settings);
+ }
+ 
+ } // namespace mistercast
+diff --git a/src/ui/MainWindow.h b/src/ui/MainWindow.h
+index 9c5ad11..998e5eb 100644
+--- a/src/ui/MainWindow.h
++++ b/src/ui/MainWindow.h
+@@ -33,7 +33,7 @@ private:
+     void stopStreaming();
+     void appendStatus(const QString& message, bool error = false);
+     void updateControls();
+-    void updateCropSettings();
++    void updateFramingSettings();
+     void updateDiagnosticsVisibility();
+     void reloadModelines(bool restartStream);
+     void applySelectedModeline(bool restartStream);
+@@ -51,6 +51,7 @@ private:
+     QComboBox* horizontalAlignment_{};
+     QComboBox* verticalAlignment_{};
+     QComboBox* rotation_{};
++    QComboBox* scaling_{};
+     QSpinBox* horizontalOffset_{};
+     QSpinBox* verticalOffset_{};
+     QPushButton* sourceButton_{};
+diff --git a/src/ui/ScalingSelector.cpp b/src/ui/ScalingSelector.cpp
+new file mode 100644
+index 0000000..823036c
+--- /dev/null
++++ b/src/ui/ScalingSelector.cpp
+@@ -0,0 +1,36 @@
++#include "ui/ScalingSelector.h"
++
++#include <QComboBox>
++#include <QSettings>
++
++namespace mistercast {
++namespace {
++QString text(std::string_view value)
++{
++    return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
++}
++}
++
++void populateScalingSelector(QComboBox& selector, const QSettings& settings)
++{
++    selector.clear();
++    for (const auto& descriptor : availableScalers()) {
++        selector.addItem(text(descriptor.displayName), text(descriptor.key));
++    }
++    const auto saved = settings.value(QStringLiteral("scalingAlgorithm")).toString().toStdString();
++    const auto algorithm = scalingAlgorithmFromKey(saved).value_or(ScalingAlgorithm::Nearest);
++    selector.setCurrentIndex(selector.findData(text(scalerDescriptor(algorithm).key)));
++}
++
++ScalingAlgorithm selectedScalingAlgorithm(const QComboBox& selector)
++{
++    return scalingAlgorithmFromKey(selector.currentData().toString().toStdString())
++        .value_or(ScalingAlgorithm::Nearest);
++}
++
++void saveScalingSelection(const QComboBox& selector, QSettings& settings)
++{
++    settings.setValue(QStringLiteral("scalingAlgorithm"),
++        text(scalerDescriptor(selectedScalingAlgorithm(selector)).key));
++}
++}
+diff --git a/src/ui/ScalingSelector.h b/src/ui/ScalingSelector.h
+new file mode 100644
+index 0000000..da90d1e
+--- /dev/null
++++ b/src/ui/ScalingSelector.h
+@@ -0,0 +1,12 @@
++#pragma once
++
++#include "core/Scaler.h"
++
++class QComboBox;
++class QSettings;
++
++namespace mistercast {
++void populateScalingSelector(QComboBox& selector, const QSettings& settings);
++ScalingAlgorithm selectedScalingAlgorithm(const QComboBox& selector);
++void saveScalingSelection(const QComboBox& selector, QSettings& settings);
++}
+diff --git a/tests/FrameProcessorTest.cpp b/tests/FrameProcessorTest.cpp
+index 375870c..8b39d85 100644
+--- a/tests/FrameProcessorTest.cpp
++++ b/tests/FrameProcessorTest.cpp
+@@ -114,7 +114,7 @@ void CoreTest::flip180()
+     const SourceFrame frame{
+         source.data(), kDefaultModeline.hActive, kDefaultModeline.vActive,
+         static_cast<std::int32_t>(kDefaultModeline.hActive * 3), PixelFormat::Bgr};
+-    CropSettings crop;
++    FramingSettings crop;
+     crop.rotation = Rotation::Flip180;
+     QVERIFY(FrameProcessor::convertToBgr(
+         frame, destination, kDefaultModeline.hActive, kDefaultModeline.vActive, crop));
+@@ -133,7 +133,7 @@ void CoreTest::quarterTurnRotations()
+     const SourceFrame frame{
+         source.data(), width, height, static_cast<std::int32_t>(width * 3), PixelFormat::Bgr};
+     std::array<std::uint8_t, width * height * 3> destination{};
+-    CropSettings crop;
++    FramingSettings crop;
+     crop.rotation = Rotation::Clockwise90;
+     QVERIFY(FrameProcessor::convertToBgr(frame, destination, 4, 3, crop));
+     const std::array<std::uint8_t, 12> clockwise{
+diff --git a/tests/ScalerTest.cpp b/tests/ScalerTest.cpp
+new file mode 100644
+index 0000000..307a163
+--- /dev/null
++++ b/tests/ScalerTest.cpp
+@@ -0,0 +1,268 @@
++#include "core/FrameProcessor.h"
++#include "ui/ScalingSelector.h"
++
++#include <QComboBox>
++#include <QSettings>
++#include <QTemporaryDir>
++#include <QtTest>
++
++#include <algorithm>
++#include <array>
++#include <set>
++#include <vector>
++
++using namespace mistercast;
++
++namespace {
++std::vector<std::uint8_t> gray(std::initializer_list<int> values)
++{
++    std::vector<std::uint8_t> result;
++    for (const auto v : values) for (int c = 0; c < 3; ++c) result.push_back(v);
++    return result;
++}
++}
++
++class ScalerTest final : public QObject {
++    Q_OBJECT
++private slots:
++    void registryAndSettings();
++    void resizeGoldens();
++    void cropRotationFormatsAndStride();
++    void nearestFractionalRotation();
++    void partitions();
++    void desktopFractionalReduction();
++    void invalidInputs();
++};
++
++void ScalerTest::registryAndSettings()
++{
++    const auto registry = availableScalers();
++    QCOMPARE(registry.size(), std::size_t{3});
++    const std::array algorithms{ScalingAlgorithm::Nearest, ScalingAlgorithm::Bilinear, ScalingAlgorithm::Area};
++    const std::array<std::string_view, 3> keys{"nearest", "bilinear", "area"};
++    std::set<std::string_view> unique;
++    for (std::size_t i = 0; i < registry.size(); ++i) {
++        QCOMPARE(registry[i].algorithm, algorithms[i]);
++        QVERIFY(registry[i].key == keys[i]);
++        QVERIFY(scalingAlgorithmFromKey(keys[i]) == algorithms[i]);
++        QVERIFY(unique.insert(registry[i].key).second);
++        QVERIFY(scalerDescriptor(algorithms[i]).key == keys[i]);
++    }
++    QVERIFY(!scalingAlgorithmFromKey("unknown"));
++    QTemporaryDir dir;
++    QVERIFY(dir.isValid());
++    const auto path = dir.filePath("settings.ini");
++    QSettings settings(path, QSettings::IniFormat);
++    QComboBox combo;
++    populateScalingSelector(combo, settings);
++    QCOMPARE(selectedScalingAlgorithm(combo), ScalingAlgorithm::Nearest);
++    settings.setValue("scalingAlgorithm", "unknown");
++    populateScalingSelector(combo, settings);
++    QCOMPARE(selectedScalingAlgorithm(combo), ScalingAlgorithm::Nearest);
++    QCOMPARE(combo.count(), static_cast<int>(registry.size()));
++    for (int i = 0; i < combo.count(); ++i) {
++        QCOMPARE(combo.itemText(i).toStdString(), std::string(registry[i].displayName));
++        QCOMPARE(combo.itemData(i).toString().toStdString(), std::string(registry[i].key));
++    }
++    // Reorder the actual widget: persistence and typed selection use keys.
++    combo.clear();
++    for (auto it = registry.rbegin(); it != registry.rend(); ++it) {
++        combo.addItem(QString::fromUtf8(it->displayName.data(), it->displayName.size()),
++                      QString::fromUtf8(it->key.data(), it->key.size()));
++    }
++    for (const auto& descriptor : registry) {
++        const auto key = QString::fromUtf8(descriptor.key.data(), descriptor.key.size());
++        combo.setCurrentIndex(combo.findData(key));
++        QCOMPARE(selectedScalingAlgorithm(combo), descriptor.algorithm);
++        saveScalingSelection(combo, settings);
++        settings.sync();
++        QSettings reopened(path, QSettings::IniFormat);
++        QCOMPARE(reopened.value("scalingAlgorithm").toString(), key);
++        QComboBox restored;
++        populateScalingSelector(restored, reopened);
++        QCOMPARE(selectedScalingAlgorithm(restored), descriptor.algorithm);
++    }
++    combo.setCurrentIndex(-1);
++    QCOMPARE(selectedScalingAlgorithm(combo), ScalingAlgorithm::Nearest);
++}
++
++void ScalerTest::resizeGoldens()
++{
++    const auto check = [](const std::vector<std::uint8_t>& source, int sw, int sh,
++                          int ow, int oh, ScalingAlgorithm algorithm,
++                          const std::vector<std::uint8_t>& expected) {
++        std::vector<std::uint8_t> output(ow * oh * 3);
++        QVERIFY(FrameProcessor::resizeBgr(source, sw, sh, output, ow, oh, algorithm));
++        QCOMPARE(output, expected);
++    };
++    for (const auto& descriptor : availableScalers()) {
++        check({1,2,3, 4,5,6, 7,8,9, 250,251,252}, 2,2,2,2, descriptor.algorithm,
++              {1,2,3, 4,5,6, 7,8,9, 250,251,252});
++    }
++    check(gray({0,100}), 2,1,4,1, ScalingAlgorithm::Nearest, gray({0,0,100,100}));
++    for (const auto algorithm : {ScalingAlgorithm::Bilinear, ScalingAlgorithm::Area}) {
++        check(gray({0,100}), 2,1,4,1, algorithm, gray({0,25,75,100}));
++        check(gray({0,100}), 1,2,1,4, algorithm, gray({0,25,75,100}));
++        check(gray({0,60,120,180}), 2,2,3,3, algorithm,
++              gray({0,30,60,60,90,120,120,150,180}));
++        check(gray({17}), 1,1,3,2, algorithm, gray({17,17,17,17,17,17}));
++    }
++    check(gray({0,4,8,12, 16,20,24,28, 32,36,40,44, 48,52,56,60}),
++          4,4,2,2, ScalingAlgorithm::Area, gray({10,18,42,50}));
++    // 5/3-wide intervals: weights (3,2)/5, (1,3,1)/5, (2,3)/5.
++    check({0,100,200, 10,90,180, 30,70,140, 60,40,80, 100,0,0},
++          5,1,3,1, ScalingAlgorithm::Area, {4,96,192, 32,68,136, 84,16,32});
++    // Fractional coverage in both axes, plus half-up rounding.
++    check(gray({0,0,90, 0,90,0, 90,0,0}), 3,3,2,2, ScalingAlgorithm::Area,
++          gray({10,50,50,10}));
++    check(gray({0,1}), 2,1,1,1, ScalingAlgorithm::Area, gray({1}));
++    // Horizontal area reduction with vertical bilinear enlargement.
++    check(gray({0,30,90, 60,90,150}), 3,2,2,3, ScalingAlgorithm::Area,
++          gray({10,70,40,100,70,130}));
++}
++
++void ScalerTest::cropRotationFormatsAndStride()
++{
++    const std::array rotations{Rotation::None, Rotation::Clockwise90,
++                              Rotation::CounterClockwise90, Rotation::Flip180};
++    const std::array<std::array<int,12>,4> filtered{{
++        {16,24,32,40,56,64,72,80,96,104,112,120},
++        {136,96,56,16,144,104,64,24,152,112,72,32},
++        {32,72,112,152,24,64,104,144,16,56,96,136},
++        {120,112,104,96,80,72,64,56,40,32,24,16}}};
++    const std::array<std::array<int,12>,4> nearest{{
++        {4,12,20,28,44,52,60,68,84,92,100,108},
++        {124,84,44,4,132,92,52,12,140,100,60,20},
++        {20,60,100,140,12,52,92,132,4,44,84,124},
++        {108,100,92,84,68,60,52,44,28,20,12,4}}};
++    for (const auto& descriptor : availableScalers()) {
++        for (std::size_t rotation = 0; rotation < rotations.size(); ++rotation) {
++            const bool quarter = rotation == 1 || rotation == 2;
++            const int width = quarter ? 8 : 10, height = quarter ? 8 : 6;
++            for (const auto format : {PixelFormat::Bgr, PixelFormat::Bgrx, PixelFormat::Bgra,
++                                      PixelFormat::Rgb, PixelFormat::Rgbx, PixelFormat::Rgba}) {
++                const bool rgb = format == PixelFormat::Rgb || format == PixelFormat::Rgbx || format == PixelFormat::Rgba;
++                const int bpp = format == PixelFormat::Bgr || format == PixelFormat::Rgb ? 3 : 4;
++                const int stride = width * bpp + 7;
++                for (const bool negative : {false, true}) {
++                    std::vector<std::uint8_t> storage(stride * height, 255);
++                    for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x) {
++                        auto* pixel = storage.data() + (negative ? height - 1 - y : y) * stride + x * bpp;
++                        pixel[rgb ? 2 : 0] = y * 20 + x * 4;
++                        pixel[1] = y * 20 + x * 4 + 10;
++                        pixel[rgb ? 0 : 2] = y * 20 + x * 4 + 20;
++                    }
++                    const SourceFrame source{storage.data() + (negative ? (height - 1) * stride : 0),
++                        static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height),
++                        negative ? -stride : stride, format};
++                    FramingSettings settings;
++                    settings.scaling = descriptor.algorithm;
++                    settings.rotation = rotations[rotation];
++                    settings.horizontal = HorizontalAlignment::Right;
++                    settings.offsetX = -1; // Both geometries have two discarded columns.
++                    std::array<std::uint8_t,36> output{};
++                    QVERIFY(FrameProcessor::convertToBgr(source, output, 4, 3, settings));
++                    const auto& expected = descriptor.algorithm == ScalingAlgorithm::Nearest ? nearest[rotation] : filtered[rotation];
++                    for (int p = 0; p < 12; ++p) for (int c = 0; c < 3; ++c) {
++                        QCOMPARE(output[p * 3 + c], expected[p] + c * 10);
++                    }
++                }
++            }
++        }
++    }
++    // Vertical alignment and offset: a 4x6 source cropped to rows 2..4.
++    std::vector<std::uint8_t> source(4 * 6 * 3);
++    for (int y = 0; y < 6; ++y) std::fill_n(source.data() + y * 12, 12, y * 20);
++    for (const auto& descriptor : availableScalers()) {
++        FramingSettings settings;
++        settings.scaling = descriptor.algorithm;
++        settings.vertical = VerticalAlignment::Bottom;
++        settings.offsetY = -1;
++        std::array<std::uint8_t,36> out{};
++        QVERIFY(FrameProcessor::convertToBgr({source.data(),4,6,0,PixelFormat::Bgr}, out,4,3,settings));
++        QCOMPARE(out[0], 40); QCOMPARE(out[12], 60); QCOMPARE(out[24], 80);
++    }
++}
++
++void ScalerTest::nearestFractionalRotation()
++{
++    std::vector<std::uint8_t> source(5 * 4 * 3);
++    for (int p = 0; p < 20; ++p) source[p * 3] = p;
++    ScalePlan plan;
++    QVERIFY(prepareScalePlan({source.data(),5,4,0,PixelFormat::Bgr},
++        {0,0,5,4,Rotation::Flip180,3,2}, ScalingAlgorithm::Nearest, plan));
++    std::array<std::uint8_t,18> out{};
++    QVERIFY(scaleRows(plan,out,0,2));
++    const std::array<int,6> expected{13,11,10,3,1,0};
++    for (int p = 0; p < 6; ++p) QCOMPARE(out[p*3],expected[p]);
++}
++
++void ScalerTest::partitions()
++{
++    std::vector<std::uint8_t> source(37 * 29 * 3);
++    for (std::size_t i = 0; i < source.size(); ++i) source[i] = (i * 73 + 19) % 256;
++    for (const auto& descriptor : availableScalers()) {
++        for (const auto rotation : {Rotation::None,Rotation::Clockwise90,Rotation::CounterClockwise90,Rotation::Flip180}) {
++            for (const auto width : {13,45}) {
++                FramingSettings settings;
++                settings.rotation = rotation;
++                settings.scaling = descriptor.algorithm;
++                ScalePlan plan;
++                const SourceFrame frame{source.data(),37,29,111,PixelFormat::Bgr};
++                QVERIFY(FrameProcessor::prepareConversion(frame,width,17,settings,plan));
++                std::vector<std::uint8_t> whole(width*17*3), split(whole.size(), 0xcd);
++                QVERIFY(FrameProcessor::convertToBgr(frame,whole,width,17,settings));
++                QVERIFY(scaleRows(plan,split,9,17));
++                QVERIFY(std::all_of(split.begin(),split.begin()+width*9*3,[](auto v){return v==0xcd;}));
++                QVERIFY(scaleRows(plan,split,0,3));
++                QVERIFY(scaleRows(plan,split,3,9));
++                QVERIFY(scaleRows(plan,split,7,7));
++                QCOMPARE(split,whole);
++            }
++        }
++    }
++}
++
++void ScalerTest::desktopFractionalReduction()
++{
++    // 1920/720 = 8/3 and 1440/576 = 5/2. Repeated cells make
++    // every destination phase independently checkable without a reference scaler.
++    std::vector<std::uint8_t> source(1920 * 1440 * 3);
++    for (int y = 0; y < 1440; ++y) for (int x = 0; x < 1920; ++x) {
++        const auto p = (y * 1920 + x) * 3;
++        source[p] = x % 8 == 2 ? 240 : 0;
++        source[p + 1] = y % 5 == 2 ? 200 : 0;
++        source[p + 2] = 73;
++    }
++    std::vector<std::uint8_t> output(720 * 576 * 3);
++    QVERIFY(FrameProcessor::resizeBgr(source,1920,1440,output,720,576,ScalingAlgorithm::Area));
++    const std::array<int,3> blue{60,30,0};
++    for (int y = 0; y < 576; ++y) for (int x = 0; x < 720; ++x) {
++        const auto p = (y * 720 + x) * 3;
++        QCOMPARE(output[p],blue[x % 3]);
++        QCOMPARE(output[p+1],40);
++        QCOMPARE(output[p+2],73);
++    }
++}
++
++void ScalerTest::invalidInputs()
++{
++    std::array<std::uint8_t,36> source{}, destination{};
++    const SourceFrame frame{source.data(),4,3,12,PixelFormat::Bgr};
++    ScalePlan plan;
++    const ScalingGeometry geometry{0,0,4,3,Rotation::None,4,3};
++    QVERIFY(prepareScalePlan(frame,geometry,ScalingAlgorithm::Nearest,plan));
++    QVERIFY(!scaleRows(plan,destination,2,1));
++    QVERIFY(!scaleRows(plan,destination,0,4));
++    QVERIFY(!scaleRows(plan,std::span(destination).first(35),0,3));
++    QVERIFY(!prepareScalePlan(frame,geometry,static_cast<ScalingAlgorithm>(99),plan));
++    QVERIFY(!scaleRows(plan,destination,0,3));
++    QVERIFY(!FrameProcessor::convertToBgr({nullptr,4,3,12,PixelFormat::Bgr},destination,4,3));
++    QVERIFY(!FrameProcessor::convertToBgr({source.data(),4,3,11,PixelFormat::Bgr},destination,4,3));
++    QVERIFY(!FrameProcessor::convertToBgr({source.data(),0,3,0,PixelFormat::Bgr},destination,4,3));
++    QVERIFY(!FrameProcessor::resizeBgr(source,4,3,destination,721,3));
++    QVERIFY(!FrameProcessor::resizeBgr(std::span(source).first(35),4,3,destination,4,3));
++}
++
++QTEST_MAIN(ScalerTest)
++#include "ScalerTest.moc"

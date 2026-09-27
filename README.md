@@ -52,7 +52,7 @@ Choose the CRT output mode before streaming. On first launch, the bundled preset
 
 Interlaced modes alternate odd and even source lines into field-sized network payloads and synchronize the field phase with MiSTer status acknowledgements. Timing values shown in the GUI are read-only and come directly from the selected modeline.
 
-The source is center-cropped to 4:3 by default. Alignment, offsets, and rotation can be changed without restarting capture. The streaming path retains only the newest frame; it never queues stale video to improve apparent smoothness.
+The source is center-cropped to 4:3 by default. The **Framing** group provides alignment, offsets, rotation, & a **Scaling** selector. **Nearest** remains the default & preserves hard pixel edges. **Bilinear** interpolates between neighboring pixel centers. **Area** averages pixel coverage when shrinking & uses bilinear interpolation on enlarging axes. Framing changes apply to subsequent captured frames without restarting capture or streaming. The selected scaler is saved between launches & also applies to the temporary frame shown during output-mode changes. The streaming path retains only the newest frame; it never queues stale video to improve apparent smoothness.
 
 Network audio must also be enabled in the Groovy_MiSTer core OSD. The GUI warns if MiSTer acknowledgements report audio disabled.
 

@@ -114,7 +114,7 @@ void CoreTest::flip180()
     const SourceFrame frame{
         source.data(), kDefaultModeline.hActive, kDefaultModeline.vActive,
         static_cast<std::int32_t>(kDefaultModeline.hActive * 3), PixelFormat::Bgr};
-    CropSettings crop;
+    FramingSettings crop;
     crop.rotation = Rotation::Flip180;
     QVERIFY(FrameProcessor::convertToBgr(
         frame, destination, kDefaultModeline.hActive, kDefaultModeline.vActive, crop));
@@ -133,7 +133,7 @@ void CoreTest::quarterTurnRotations()
     const SourceFrame frame{
         source.data(), width, height, static_cast<std::int32_t>(width * 3), PixelFormat::Bgr};
     std::array<std::uint8_t, width * height * 3> destination{};
-    CropSettings crop;
+    FramingSettings crop;
     crop.rotation = Rotation::Clockwise90;
     QVERIFY(FrameProcessor::convertToBgr(frame, destination, 4, 3, crop));
     const std::array<std::uint8_t, 12> clockwise{

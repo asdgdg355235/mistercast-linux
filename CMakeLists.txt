@@ -29,6 +29,8 @@ add_library(mistercast_core
     src/core/FrameMailbox.h
     src/core/FrameProcessor.cpp
     src/core/FrameProcessor.h
+    src/core/Scaler.cpp
+    src/core/Scaler.h
     src/core/FrameSequence.h
     src/core/StreamTypes.h
     src/core/StereoSampleRing.cpp
@@ -70,6 +72,8 @@ add_executable(mistercast
     src/stream/StreamSession.h
     src/ui/MainWindow.cpp
     src/ui/MainWindow.h
+    src/ui/ScalingSelector.cpp
+    src/ui/ScalingSelector.h
     src/main.cpp
 )
 
@@ -91,6 +95,13 @@ qt_add_resources(mistercast "modelines"
 )
 
 if(BUILD_TESTING)
+    add_executable(scaler_test tests/ScalerTest.cpp src/ui/ScalingSelector.cpp)
+    set_target_properties(scaler_test PROPERTIES AUTOMOC ON)
+    target_link_libraries(scaler_test PRIVATE mistercast_core Qt6::Test Qt6::Widgets)
+    target_compile_options(scaler_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME scaler COMMAND scaler_test)
+    set_tests_properties(scaler PROPERTIES TIMEOUT 10 LABELS unit ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
     add_executable(frame_processor_test tests/FrameProcessorTest.cpp)
     set_target_properties(frame_processor_test PROPERTIES AUTOMOC ON)
     target_link_libraries(frame_processor_test PRIVATE mistercast_core Qt6::Test)

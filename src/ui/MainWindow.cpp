@@ -1,4 +1,5 @@
 #include "ui/MainWindow.h"
+#include "ui/ScalingSelector.h"
 
 #include "core/ModelineCatalog.h"
 
@@ -84,6 +85,8 @@ MainWindow::MainWindow(QWidget* parent)
     rotation_->addItems({QStringLiteral("None"), QStringLiteral("90 degrees clockwise"),
                          QStringLiteral("90 degrees counter-clockwise"), QStringLiteral("180 degrees")});
     rotation_->setCurrentIndex(settings.value(QStringLiteral("rotation"), 0).toInt());
+    scaling_ = new QComboBox(framingGroup);
+    populateScalingSelector(*scaling_, settings);
     horizontalOffset_ = new QSpinBox(framingGroup);
     horizontalOffset_->setRange(-4096, 4096);
     horizontalOffset_->setValue(settings.value(QStringLiteral("horizontalOffset"), 0).toInt());
@@ -93,6 +96,7 @@ MainWindow::MainWindow(QWidget* parent)
     framingForm->addRow(QStringLiteral("Horizontal"), horizontalAlignment_);
     framingForm->addRow(QStringLiteral("Vertical"), verticalAlignment_);
     framingForm->addRow(QStringLiteral("Rotation"), rotation_);
+    framingForm->addRow(QStringLiteral("Scaling"), scaling_);
     framingForm->addRow(QStringLiteral("Horizontal offset"), horizontalOffset_);
     framingForm->addRow(QStringLiteral("Vertical offset"), verticalOffset_);
     layout->addWidget(framingGroup);
@@ -139,11 +143,12 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(reloadModelinesButton_, &QPushButton::clicked, this,
         [this] { reloadModelines(true); });
-    connect(horizontalAlignment_, &QComboBox::currentIndexChanged, this, &MainWindow::updateCropSettings);
-    connect(verticalAlignment_, &QComboBox::currentIndexChanged, this, &MainWindow::updateCropSettings);
-    connect(rotation_, &QComboBox::currentIndexChanged, this, &MainWindow::updateCropSettings);
-    connect(horizontalOffset_, &QSpinBox::valueChanged, this, &MainWindow::updateCropSettings);
-    connect(verticalOffset_, &QSpinBox::valueChanged, this, &MainWindow::updateCropSettings);
+    connect(horizontalAlignment_, &QComboBox::currentIndexChanged, this, &MainWindow::updateFramingSettings);
+    connect(verticalAlignment_, &QComboBox::currentIndexChanged, this, &MainWindow::updateFramingSettings);
+    connect(rotation_, &QComboBox::currentIndexChanged, this, &MainWindow::updateFramingSettings);
+    connect(scaling_, &QComboBox::currentIndexChanged, this, &MainWindow::updateFramingSettings);
+    connect(horizontalOffset_, &QSpinBox::valueChanged, this, &MainWindow::updateFramingSettings);
+    connect(verticalOffset_, &QSpinBox::valueChanged, this, &MainWindow::updateFramingSettings);
 
     connect(&streaming_, &StreamingCoordinator::sourceSelectionStarted, this,
         [this] {
@@ -284,7 +289,7 @@ MainWindow::MainWindow(QWidget* parent)
         });
 
     reloadModelines(false);
-    updateCropSettings();
+    updateFramingSettings();
     updateDiagnosticsVisibility();
     updateControls();
 }
@@ -471,15 +476,18 @@ const Modeline& MainWindow::selectedModeline() const
     return modelines_[static_cast<std::size_t>(index)];
 }
 
-void MainWindow::updateCropSettings()
+void MainWindow::updateFramingSettings()
 {
-    CropSettings settings;
+    FramingSettings settings;
     settings.horizontal = static_cast<HorizontalAlignment>(horizontalAlignment_->currentIndex());
     settings.vertical = static_cast<VerticalAlignment>(verticalAlignment_->currentIndex());
     settings.rotation = static_cast<Rotation>(rotation_->currentIndex());
     settings.offsetX = horizontalOffset_->value();
     settings.offsetY = verticalOffset_->value();
-    streaming_.setCropSettings(settings);
+    settings.scaling = selectedScalingAlgorithm(*scaling_);
+    QSettings persistent;
+    saveScalingSelection(*scaling_, persistent);
+    streaming_.setFramingSettings(settings);
 }
 
 } // namespace mistercast

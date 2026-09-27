@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/Scaler.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -42,12 +44,13 @@ enum class Rotation {
     Flip180,
 };
 
-struct CropSettings {
+struct FramingSettings {
     HorizontalAlignment horizontal{HorizontalAlignment::Center};
     VerticalAlignment vertical{VerticalAlignment::Center};
     std::int32_t offsetX{};
     std::int32_t offsetY{};
     Rotation rotation{Rotation::None};
+    ScalingAlgorithm scaling{ScalingAlgorithm::Nearest};
 };
 
 class FrameProcessor {
@@ -57,17 +60,19 @@ public:
         std::span<std::uint8_t> destination,
         std::uint16_t outputWidth,
         std::uint16_t outputHeight,
-        const CropSettings& crop = {});
+        const FramingSettings& framing = {});
     static bool resizeBgr(
         std::span<const std::uint8_t> source,
         std::uint16_t sourceWidth,
         std::uint16_t sourceHeight,
         std::span<std::uint8_t> destination,
         std::uint16_t outputWidth,
-        std::uint16_t outputHeight);
+        std::uint16_t outputHeight,
+        ScalingAlgorithm scaling = ScalingAlgorithm::Nearest);
 
-private:
-    static std::uint32_t bytesPerPixel(PixelFormat format);
+    static bool prepareConversion(
+        const SourceFrame& source, std::uint16_t outputWidth,
+        std::uint16_t outputHeight, const FramingSettings& framing, ScalePlan& plan);
 };
 
 } // namespace mistercast

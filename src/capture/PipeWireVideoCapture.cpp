@@ -217,14 +217,19 @@ void PipeWireVideoCapture::stop()
     }
 }
 
-void PipeWireVideoCapture::setCropSettings(CropSettings settings)
+void PipeWireVideoCapture::setFramingSettings(FramingSettings settings)
 {
-    std::lock_guard lock(cropMutex_);
-    crop_ = settings;
+    std::lock_guard lock(framingMutex_);
+    framing_ = settings;
 }
 
 ModeEpoch PipeWireVideoCapture::setOutputMode(const Modeline& modeline)
 {
+    ScalingAlgorithm scaling;
+    {
+        std::lock_guard lock(framingMutex_);
+        scaling = framing_.scaling;
+    }
     ModeEpoch modeEpoch;
     {
         std::lock_guard lock(modeMutex_);
@@ -257,7 +262,8 @@ ModeEpoch PipeWireVideoCapture::setOutputMode(const Modeline& modeline)
                 cachedConvertedHeight_,
                 destination,
                 modeline.hActive,
-                modeline.vActive)) {
+                modeline.vActive,
+                scaling)) {
             convertedWidth_ = modeline.hActive;
             convertedHeight_ = modeline.vActive;
             convertedFrameIsSynthetic_ = true;
@@ -495,10 +501,10 @@ void PipeWireVideoCapture::processFrame()
         pixelFormatValue,
     };
 
-    CropSettings crop;
+    FramingSettings framing;
     {
-        std::lock_guard lock(cropMutex_);
-        crop = crop_;
+        std::lock_guard lock(framingMutex_);
+        framing = framing_;
     }
     
     Modeline mode;
@@ -520,7 +526,7 @@ void PipeWireVideoCapture::processFrame()
         }
 
         if (currentMode && FrameProcessor::convertToBgr(
-                source, destination, mode.hActive, mode.vActive, crop)) {
+                source, destination, mode.hActive, mode.vActive, framing)) {
             convertedWidth_ = mode.hActive;
             convertedHeight_ = mode.vActive;
             hasConvertedFrame_ = true;

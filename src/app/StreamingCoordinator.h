@@ -28,7 +28,7 @@ public:
     void stopStreaming();
     void shutdown();
     void setOutputMode(const Modeline& modeline);
-    void setCropSettings(CropSettings settings);
+    void setFramingSettings(FramingSettings settings);
 
     [[nodiscard]] bool sourceReady() const { return sourceReady_; }
     [[nodiscard]] bool streaming() const { return controller_.running(); }

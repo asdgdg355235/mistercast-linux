@@ -33,7 +33,7 @@ private:
     void stopStreaming();
     void appendStatus(const QString& message, bool error = false);
     void updateControls();
-    void updateCropSettings();
+    void updateFramingSettings();
     void updateDiagnosticsVisibility();
     void reloadModelines(bool restartStream);
     void applySelectedModeline(bool restartStream);
@@ -51,6 +51,7 @@ private:
     QComboBox* horizontalAlignment_{};
     QComboBox* verticalAlignment_{};
     QComboBox* rotation_{};
+    QComboBox* scaling_{};
     QSpinBox* horizontalOffset_{};
     QSpinBox* verticalOffset_{};
     QPushButton* sourceButton_{};

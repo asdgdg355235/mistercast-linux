@@ -169,9 +169,9 @@ void StreamingCoordinator::setOutputMode(const Modeline& modeline)
     modeEpoch_ = videoCapture_.setOutputMode(modeline);
 }
 
-void StreamingCoordinator::setCropSettings(CropSettings settings)
+void StreamingCoordinator::setFramingSettings(FramingSettings settings)
 {
-    videoCapture_.setCropSettings(settings);
+    videoCapture_.setFramingSettings(settings);
 }
 
 } // namespace mistercast
