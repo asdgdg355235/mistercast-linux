@@ -36,8 +36,25 @@ bool StreamController::start(StreamConfig config)
 
     const auto generation = ++sessionGeneration_;
 
+    if (config.controllerEnabled) {
+        std::string error;
+        const auto report = [this, generation](const std::string& message) {
+            QMetaObject::invokeMethod(this, [this, generation, message] {
+                if (generation == sessionGeneration_) emit warning(QString::fromStdString(message));
+            }, Qt::QueuedConnection);
+        };
+        if (!controllerInput_.start(config.host, config.mpvIpcPath, report, error)) {
+            report(error);
+        }
+    }
+
     session_ = std::make_unique<StreamSession>(
         mailbox_, audioCapture_, std::move(config));
+
+    // Only an atomic activation flag crosses into the streaming thread.
+    connect(session_.get(), &StreamSession::started, this, [this] {
+        controllerInput_.activate();
+    }, Qt::DirectConnection);
 
     connect(session_.get(), &StreamSession::started, this, [this, generation] {
         if (generation == sessionGeneration_) {
@@ -84,8 +101,9 @@ bool StreamController::start(StreamConfig config)
     auto* session = session_.get();
 
     thread_ = std::make_unique<std::jthread>(
-        [session](std::stop_token stopToken) {
+        [this, session](std::stop_token stopToken) {
             session->run(stopToken);
+            controllerInput_.stop();
         });
 
     return true;
@@ -104,6 +122,7 @@ void StreamController::stop()
         session_.reset();
     }
     
+    controllerInput_.stop();
     running_ = false;
 }
 

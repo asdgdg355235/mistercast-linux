@@ -75,3 +75,9 @@ The currently active desktop compositor determines how early a rendered frame be
 - If the source chooser does not open, verify that `xdg-desktop-portal` and the compositor-specific backend are running.
 - If output audio is missing, check the default PipeWire sink with `wpctl status`, verify that a session manager such as WirePlumber is running, and enable network audio in the core OSD.
 - If diagnostics show UDP queue growth, repeated drops, pacing overruns, fallback, unsynced, or queue-empty samples, verify both Ethernet ports with `ethtool`. A damaged cable or 100 Mb/s switch port cannot sustain high-resolution video payloads.
+
+## Optional mpv controller controls
+
+MiSTer controllers can control an external mpv player's JSON IPC socket while
+streaming. This is disabled by default. See [setup, bindings, protocol references
+& tests](docs/mpv-controller.md).

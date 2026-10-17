@@ -109,7 +109,8 @@ void StreamingCoordinator::selectSource()
     portal_.selectSource();
 }
 
-void StreamingCoordinator::startStreaming(std::string host, bool audioEnabled)
+void StreamingCoordinator::startStreaming(std::string host, bool audioEnabled,
+                                          bool controllerEnabled, std::string mpvIpcPath)
 {
     if (!sourceReady_ || controller_.running()) {
         return;
@@ -130,6 +131,8 @@ void StreamingCoordinator::startStreaming(std::string host, bool audioEnabled)
         audioEnabled,
         outputMode_,
         modeEpoch_,
+        controllerEnabled,
+        std::move(mpvIpcPath),
     };
 
     if (!controller_.start(std::move(config))) {

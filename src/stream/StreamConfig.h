@@ -12,6 +12,8 @@ struct StreamConfig {
     bool audioEnabled{};
     Modeline modeline;
     ModeEpoch modeEpoch;
+    bool controllerEnabled{};
+    std::string mpvIpcPath;
 };
 
 } // namespace mistercast

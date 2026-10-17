@@ -4,6 +4,7 @@
 #include "core/FrameMailbox.h"
 #include "stream/StreamConfig.h"
 #include "stream/StreamDiagnostics.h"
+#include "input/ControllerReceiver.h"
 
 #include <QObject>
 
@@ -46,6 +47,7 @@ private:
     std::unique_ptr<std::jthread> thread_;
     std::atomic_bool running_{};
     std::uint64_t sessionGeneration_{};
+    ControllerReceiver controllerInput_;
 };
 
 } // namespace mistercast
