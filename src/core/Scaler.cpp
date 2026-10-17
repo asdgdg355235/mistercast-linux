@@ -119,6 +119,8 @@ constexpr std::array registrations{
     Registration{{ScalingAlgorithm::Nearest, "nearest", "Nearest"}, nearest, nearestRows},
     Registration{{ScalingAlgorithm::Bilinear, "bilinear", "Bilinear"}, bilinear, weightedRows},
     Registration{{ScalingAlgorithm::Area, "area", "Area"}, area, weightedRows},
+    Registration{{ScalingAlgorithm::LancIR, "lancir", "LANCIR (Lanczos-3)",
+                  ScalerBackend::LancIR}, nullptr, nullptr},
 };
 constexpr auto descriptors = [] {
     std::array<ScalerDescriptor, registrations.size()> result{};
@@ -145,21 +147,16 @@ std::optional<ScalingAlgorithm> scalingAlgorithmFromKey(std::string_view key)
     return std::nullopt;
 }
 
-bool prepareScalePlan(const SourceFrame& source, const ScalingGeometry& geometry,
-                      ScalingAlgorithm algorithm, ScalePlan& plan)
+bool prepareScalingInput(const SourceFrame& source, const ScalingGeometry& geometry,
+                         ScalingInput& input)
 {
-    plan.kernel = nullptr;
-    const Registration* registration = nullptr;
-    for (const auto& entry : registrations) {
-        if (entry.descriptor.algorithm == algorithm) registration = &entry;
-    }
     std::uint32_t bpp = 0;
     switch (source.format) {
     case PixelFormat::Bgr: case PixelFormat::Rgb: bpp = 3; break;
     case PixelFormat::Bgrx: case PixelFormat::Bgra:
     case PixelFormat::Rgbx: case PixelFormat::Rgba: bpp = 4; break;
     }
-    if (!registration || !source.data || !bpp || !source.width || !source.height ||
+    if (!source.data || !bpp || !source.width || !source.height ||
         !geometry.cropWidth || !geometry.cropHeight ||
         !geometry.outputWidth || !geometry.outputHeight ||
         geometry.outputWidth > kMaximumActiveWidth || geometry.outputHeight > kMaximumActiveHeight ||
@@ -175,6 +172,36 @@ bool prepareScalePlan(const SourceFrame& source, const ScalingGeometry& geometry
             (std::numeric_limits<std::ptrdiff_t>::max() - rowBytes) /
                 static_cast<std::uint64_t>(absStride)) return false;
 
+    switch (geometry.rotation) {
+    case Rotation::None: case Rotation::Clockwise90:
+    case Rotation::CounterClockwise90: case Rotation::Flip180: break;
+    default: return false;
+    }
+    input.pixels = source.data + std::int64_t{geometry.cropY} * stride +
+        std::int64_t{geometry.cropX} * bpp;
+    input.stride = stride;
+    input.channels = bpp;
+    const bool rgb = source.format == PixelFormat::Rgb || source.format == PixelFormat::Rgbx ||
+        source.format == PixelFormat::Rgba;
+    input.blue = rgb ? 2 : 0;
+    input.red = rgb ? 0 : 2;
+    input.quarterTurn = geometry.rotation == Rotation::Clockwise90 ||
+        geometry.rotation == Rotation::CounterClockwise90;
+    return true;
+}
+
+bool prepareScalePlan(const SourceFrame& source, const ScalingGeometry& geometry,
+                      ScalingAlgorithm algorithm, ScalePlan& plan)
+{
+    plan.kernel = nullptr;
+    const Registration* registration = nullptr;
+    for (const auto& entry : registrations) {
+        if (entry.descriptor.algorithm == algorithm) registration = &entry;
+    }
+    ScalingInput input;
+    if (!registration || !registration->axis || !prepareScalingInput(source, geometry, input)) {
+        return false;
+    }
     bool quarterTurn = false, reverseX = false, reverseY = false;
     switch (geometry.rotation) {
     case Rotation::None: break;
@@ -184,14 +211,11 @@ bool prepareScalePlan(const SourceFrame& source, const ScalingGeometry& geometry
     default: return false;
     }
     plan.geometry = geometry;
-    plan.source = source.data + std::int64_t{geometry.cropY} * stride +
-        std::int64_t{geometry.cropX} * bpp;
-    plan.xStep = quarterTurn ? stride : bpp;
-    plan.yStep = quarterTurn ? bpp : stride;
-    const bool rgb = source.format == PixelFormat::Rgb || source.format == PixelFormat::Rgbx ||
-        source.format == PixelFormat::Rgba;
-    plan.blue = rgb ? 2 : 0;
-    plan.red = rgb ? 0 : 2;
+    plan.source = input.pixels;
+    plan.xStep = quarterTurn ? input.stride : input.channels;
+    plan.yStep = quarterTurn ? input.channels : input.stride;
+    plan.blue = input.blue;
+    plan.red = input.red;
     plan.copyRows = geometry.rotation == Rotation::None && source.format == PixelFormat::Bgr &&
         geometry.cropWidth == geometry.outputWidth && geometry.cropHeight == geometry.outputHeight;
     // Reverse destination coordinates before sampling, preserving legacy

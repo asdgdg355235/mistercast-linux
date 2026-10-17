@@ -14,6 +14,7 @@ if(BUILD_TESTING)
 endif()
 
 find_package(PkgConfig REQUIRED)
+find_package(Threads REQUIRED)
 
 pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3 libspa-0.2)
 pkg_check_modules(LZ4 REQUIRED IMPORTED_TARGET liblz4)
@@ -31,6 +32,9 @@ add_library(mistercast_core
     src/core/FrameProcessor.h
     src/core/Scaler.cpp
     src/core/Scaler.h
+    src/core/ScalingExecutor.cpp
+    src/core/ScalingExecutor.h
+    src/core/LancIRRuntime.h
     src/core/FrameSequence.h
     src/core/StreamTypes.h
     src/core/StereoSampleRing.cpp
@@ -46,7 +50,8 @@ add_library(mistercast_core
 )
 
 target_include_directories(mistercast_core PUBLIC src)
-target_link_libraries(mistercast_core PRIVATE PkgConfig::LZ4)
+target_include_directories(mistercast_core SYSTEM PRIVATE third_party/avir)
+target_link_libraries(mistercast_core PRIVATE PkgConfig::LZ4 PUBLIC Threads::Threads)
 target_compile_options(mistercast_core PRIVATE -Wall -Wextra -Wpedantic)
 
 add_executable(mistercast
@@ -95,6 +100,13 @@ qt_add_resources(mistercast "modelines"
 )
 
 if(BUILD_TESTING)
+    add_executable(scaling_executor_test tests/ScalingExecutorTest.cpp tests/LancIRReference.cpp)
+    target_link_libraries(scaling_executor_test PRIVATE mistercast_core)
+    target_include_directories(scaling_executor_test SYSTEM PRIVATE third_party/avir)
+    target_compile_options(scaling_executor_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME scaling_executor COMMAND scaling_executor_test)
+    set_tests_properties(scaling_executor PROPERTIES TIMEOUT 60 LABELS "unit;concurrency")
+
     add_executable(scaler_test tests/ScalerTest.cpp src/ui/ScalingSelector.cpp)
     set_target_properties(scaler_test PROPERTIES AUTOMOC ON)
     target_link_libraries(scaler_test PRIVATE mistercast_core Qt6::Test Qt6::Widgets)
@@ -145,3 +157,12 @@ install(FILES packaging/mistercast.desktop
 install(FILES resources/mistercast.svg
     DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
 install(FILES README.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
+
+install(FILES third_party/avir/LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR}/avir)
+
+option(MISTERCAST_BUILD_BENCHMARKS "Build the optional scaler benchmark" OFF)
+if(MISTERCAST_BUILD_BENCHMARKS)
+    add_executable(scaler_benchmark tests/ScalerBenchmark.cpp)
+    target_link_libraries(scaler_benchmark PRIVATE mistercast_core)
+    target_compile_options(scaler_benchmark PRIVATE -Wall -Wextra -Wpedantic)
+endif()

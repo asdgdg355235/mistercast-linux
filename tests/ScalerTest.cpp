@@ -1,4 +1,5 @@
 #include "core/FrameProcessor.h"
+#include "core/ScalingExecutor.h"
 #include "ui/ScalingSelector.h"
 
 #include <QComboBox>
@@ -27,19 +28,24 @@ class ScalerTest final : public QObject {
 private slots:
     void registryAndSettings();
     void resizeGoldens();
+    void resizeGoldens_data();
     void cropRotationFormatsAndStride();
+    void cropRotationFormatsAndStride_data();
     void nearestFractionalRotation();
     void partitions();
+    void partitions_data();
     void desktopFractionalReduction();
+    void desktopFractionalReduction_data();
     void invalidInputs();
+    void invalidInputs_data();
 };
 
 void ScalerTest::registryAndSettings()
 {
     const auto registry = availableScalers();
-    QCOMPARE(registry.size(), std::size_t{3});
-    const std::array algorithms{ScalingAlgorithm::Nearest, ScalingAlgorithm::Bilinear, ScalingAlgorithm::Area};
-    const std::array<std::string_view, 3> keys{"nearest", "bilinear", "area"};
+    QCOMPARE(registry.size(), std::size_t{4});
+    const std::array algorithms{ScalingAlgorithm::Nearest, ScalingAlgorithm::Bilinear, ScalingAlgorithm::Area, ScalingAlgorithm::LancIR};
+    const std::array<std::string_view, 4> keys{"nearest", "bilinear", "area", "lancir"};
     std::set<std::string_view> unique;
     for (std::size_t i = 0; i < registry.size(); ++i) {
         QCOMPARE(registry[i].algorithm, algorithms[i]);
@@ -48,6 +54,7 @@ void ScalerTest::registryAndSettings()
         QVERIFY(unique.insert(registry[i].key).second);
         QVERIFY(scalerDescriptor(algorithms[i]).key == keys[i]);
     }
+    QCOMPARE(std::string(scalerDescriptor(ScalingAlgorithm::LancIR).displayName), std::string("LANCIR (Lanczos-3)"));
     QVERIFY(!scalingAlgorithmFromKey("unknown"));
     QTemporaryDir dir;
     QVERIFY(dir.isValid());
@@ -88,11 +95,13 @@ void ScalerTest::registryAndSettings()
 
 void ScalerTest::resizeGoldens()
 {
-    const auto check = [](const std::vector<std::uint8_t>& source, int sw, int sh,
+    QFETCH(int, workers);
+    ScalingExecutor executor(workers);
+    const auto check = [&](const std::vector<std::uint8_t>& source, int sw, int sh,
                           int ow, int oh, ScalingAlgorithm algorithm,
                           const std::vector<std::uint8_t>& expected) {
         std::vector<std::uint8_t> output(ow * oh * 3);
-        QVERIFY(FrameProcessor::resizeBgr(source, sw, sh, output, ow, oh, algorithm));
+        QVERIFY(FrameProcessor::resizeBgr(executor, source, sw, sh, output, ow, oh, algorithm));
         QCOMPARE(output, expected);
     };
     for (const auto& descriptor : availableScalers()) {
@@ -123,6 +132,8 @@ void ScalerTest::resizeGoldens()
 
 void ScalerTest::cropRotationFormatsAndStride()
 {
+    QFETCH(int, workers);
+    ScalingExecutor executor(workers);
     const std::array rotations{Rotation::None, Rotation::Clockwise90,
                               Rotation::CounterClockwise90, Rotation::Flip180};
     const std::array<std::array<int,12>,4> filtered{{
@@ -136,6 +147,7 @@ void ScalerTest::cropRotationFormatsAndStride()
         {20,60,100,140,12,52,92,132,4,44,84,124},
         {108,100,92,84,68,60,52,44,28,20,12,4}}};
     for (const auto& descriptor : availableScalers()) {
+        if (descriptor.backend != ScalerBackend::NativeRows) continue;
         for (std::size_t rotation = 0; rotation < rotations.size(); ++rotation) {
             const bool quarter = rotation == 1 || rotation == 2;
             const int width = quarter ? 8 : 10, height = quarter ? 8 : 6;
@@ -161,7 +173,7 @@ void ScalerTest::cropRotationFormatsAndStride()
                     settings.horizontal = HorizontalAlignment::Right;
                     settings.offsetX = -1; // Both geometries have two discarded columns.
                     std::array<std::uint8_t,36> output{};
-                    QVERIFY(FrameProcessor::convertToBgr(source, output, 4, 3, settings));
+                    QVERIFY(FrameProcessor::convertToBgr(executor, source, output, 4, 3, settings));
                     const auto& expected = descriptor.algorithm == ScalingAlgorithm::Nearest ? nearest[rotation] : filtered[rotation];
                     for (int p = 0; p < 12; ++p) for (int c = 0; c < 3; ++c) {
                         QCOMPARE(output[p * 3 + c], expected[p] + c * 10);
@@ -179,7 +191,7 @@ void ScalerTest::cropRotationFormatsAndStride()
         settings.vertical = VerticalAlignment::Bottom;
         settings.offsetY = -1;
         std::array<std::uint8_t,36> out{};
-        QVERIFY(FrameProcessor::convertToBgr({source.data(),4,6,0,PixelFormat::Bgr}, out,4,3,settings));
+        QVERIFY(FrameProcessor::convertToBgr(executor, {source.data(),4,6,0,PixelFormat::Bgr}, out,4,3,settings));
         QCOMPARE(out[0], 40); QCOMPARE(out[12], 60); QCOMPARE(out[24], 80);
     }
 }
@@ -199,9 +211,12 @@ void ScalerTest::nearestFractionalRotation()
 
 void ScalerTest::partitions()
 {
+    QFETCH(int, workers);
+    ScalingExecutor executor(workers);
     std::vector<std::uint8_t> source(37 * 29 * 3);
     for (std::size_t i = 0; i < source.size(); ++i) source[i] = (i * 73 + 19) % 256;
     for (const auto& descriptor : availableScalers()) {
+        if (descriptor.backend != ScalerBackend::NativeRows) continue;
         for (const auto rotation : {Rotation::None,Rotation::Clockwise90,Rotation::CounterClockwise90,Rotation::Flip180}) {
             for (const auto width : {13,45}) {
                 FramingSettings settings;
@@ -211,7 +226,7 @@ void ScalerTest::partitions()
                 const SourceFrame frame{source.data(),37,29,111,PixelFormat::Bgr};
                 QVERIFY(FrameProcessor::prepareConversion(frame,width,17,settings,plan));
                 std::vector<std::uint8_t> whole(width*17*3), split(whole.size(), 0xcd);
-                QVERIFY(FrameProcessor::convertToBgr(frame,whole,width,17,settings));
+                QVERIFY(FrameProcessor::convertToBgr(executor, frame,whole,width,17,settings));
                 QVERIFY(scaleRows(plan,split,9,17));
                 QVERIFY(std::all_of(split.begin(),split.begin()+width*9*3,[](auto v){return v==0xcd;}));
                 QVERIFY(scaleRows(plan,split,0,3));
@@ -225,6 +240,8 @@ void ScalerTest::partitions()
 
 void ScalerTest::desktopFractionalReduction()
 {
+    QFETCH(int, workers);
+    ScalingExecutor executor(workers);
     // 1920/720 = 8/3 and 1440/576 = 5/2. Repeated cells make
     // every destination phase independently checkable without a reference scaler.
     std::vector<std::uint8_t> source(1920 * 1440 * 3);
@@ -235,7 +252,7 @@ void ScalerTest::desktopFractionalReduction()
         source[p + 2] = 73;
     }
     std::vector<std::uint8_t> output(720 * 576 * 3);
-    QVERIFY(FrameProcessor::resizeBgr(source,1920,1440,output,720,576,ScalingAlgorithm::Area));
+    QVERIFY(FrameProcessor::resizeBgr(executor, source,1920,1440,output,720,576,ScalingAlgorithm::Area));
     const std::array<int,3> blue{60,30,0};
     for (int y = 0; y < 576; ++y) for (int x = 0; x < 720; ++x) {
         const auto p = (y * 720 + x) * 3;
@@ -247,6 +264,8 @@ void ScalerTest::desktopFractionalReduction()
 
 void ScalerTest::invalidInputs()
 {
+    QFETCH(int, workers);
+    ScalingExecutor executor(workers);
     std::array<std::uint8_t,36> source{}, destination{};
     const SourceFrame frame{source.data(),4,3,12,PixelFormat::Bgr};
     ScalePlan plan;
@@ -257,12 +276,42 @@ void ScalerTest::invalidInputs()
     QVERIFY(!scaleRows(plan,std::span(destination).first(35),0,3));
     QVERIFY(!prepareScalePlan(frame,geometry,static_cast<ScalingAlgorithm>(99),plan));
     QVERIFY(!scaleRows(plan,destination,0,3));
-    QVERIFY(!FrameProcessor::convertToBgr({nullptr,4,3,12,PixelFormat::Bgr},destination,4,3));
-    QVERIFY(!FrameProcessor::convertToBgr({source.data(),4,3,11,PixelFormat::Bgr},destination,4,3));
-    QVERIFY(!FrameProcessor::convertToBgr({source.data(),0,3,0,PixelFormat::Bgr},destination,4,3));
-    QVERIFY(!FrameProcessor::resizeBgr(source,4,3,destination,721,3));
-    QVERIFY(!FrameProcessor::resizeBgr(std::span(source).first(35),4,3,destination,4,3));
+    QVERIFY(!FrameProcessor::convertToBgr(executor, {nullptr,4,3,12,PixelFormat::Bgr},destination,4,3));
+    QVERIFY(!FrameProcessor::convertToBgr(executor, {source.data(),4,3,11,PixelFormat::Bgr},destination,4,3));
+    QVERIFY(!FrameProcessor::convertToBgr(executor, {source.data(),0,3,0,PixelFormat::Bgr},destination,4,3));
+    QVERIFY(!FrameProcessor::resizeBgr(executor, source,4,3,destination,721,3));
+    QVERIFY(!FrameProcessor::resizeBgr(executor, std::span(source).first(35),4,3,destination,4,3));
 }
 
 QTEST_MAIN(ScalerTest)
 #include "ScalerTest.moc"
+
+void ScalerTest::resizeGoldens_data()
+{
+    QTest::addColumn<int>("workers");
+    for (int n : {1, 2, 7}) QTest::newRow(qPrintable(QString::number(n))) << n;
+}
+
+void ScalerTest::cropRotationFormatsAndStride_data()
+{
+    QTest::addColumn<int>("workers");
+    for (int n : {1, 2, 7}) QTest::newRow(qPrintable(QString::number(n))) << n;
+}
+
+void ScalerTest::partitions_data()
+{
+    QTest::addColumn<int>("workers");
+    for (int n : {1, 2, 7}) QTest::newRow(qPrintable(QString::number(n))) << n;
+}
+
+void ScalerTest::desktopFractionalReduction_data()
+{
+    QTest::addColumn<int>("workers");
+    for (int n : {1, 2, 7}) QTest::newRow(qPrintable(QString::number(n))) << n;
+}
+
+void ScalerTest::invalidInputs_data()
+{
+    QTest::addColumn<int>("workers");
+    for (int n : {1, 2, 7}) QTest::newRow(qPrintable(QString::number(n))) << n;
+}

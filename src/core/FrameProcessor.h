@@ -53,15 +53,19 @@ struct FramingSettings {
     ScalingAlgorithm scaling{ScalingAlgorithm::Nearest};
 };
 
+class ScalingExecutor;
+
 class FrameProcessor {
 public:
     static bool convertToBgr(
+        ScalingExecutor& executor,
         const SourceFrame& source,
         std::span<std::uint8_t> destination,
         std::uint16_t outputWidth,
         std::uint16_t outputHeight,
         const FramingSettings& framing = {});
     static bool resizeBgr(
+        ScalingExecutor& executor,
         std::span<const std::uint8_t> source,
         std::uint16_t sourceWidth,
         std::uint16_t sourceHeight,
@@ -69,6 +73,10 @@ public:
         std::uint16_t outputWidth,
         std::uint16_t outputHeight,
         ScalingAlgorithm scaling = ScalingAlgorithm::Nearest);
+
+    static ScalingGeometry framingGeometry(
+        const SourceFrame& source, std::uint16_t outputWidth,
+        std::uint16_t outputHeight, const FramingSettings& framing);
 
     static bool prepareConversion(
         const SourceFrame& source, std::uint16_t outputWidth,

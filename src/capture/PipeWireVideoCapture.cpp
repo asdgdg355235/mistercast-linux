@@ -257,6 +257,7 @@ ModeEpoch PipeWireVideoCapture::setOutputMode(const Modeline& modeline)
         auto destination = std::span(converted_).first(modeline.fullFrameBytes());
         
         if (FrameProcessor::resizeBgr(
+                scalingExecutor_,
                 std::span(previousConverted_).first(cachedBytes),
                 cachedConvertedWidth_,
                 cachedConvertedHeight_,
@@ -273,6 +274,10 @@ ModeEpoch PipeWireVideoCapture::setOutputMode(const Modeline& modeline)
                 modeline.vActive,
                 modeEpoch,
                 convertedCapturedAt_);
+        } else {
+            // A failed worker may have written part of converted_. Do not let
+            // a later mode change treat that buffer as a completed frame.
+            hasConvertedFrame_ = false;
         }
     }
 
@@ -445,6 +450,8 @@ void PipeWireVideoCapture::processFrame()
                 mode.vActive,
                 modeEpoch,
                 dequeuedAt);
+        } else if (currentMode) {
+            hasConvertedFrame_ = false;
         }
 
         pw_stream_queue_buffer(stream_, latest);
@@ -526,6 +533,7 @@ void PipeWireVideoCapture::processFrame()
         }
 
         if (currentMode && FrameProcessor::convertToBgr(
+                scalingExecutor_,
                 source, destination, mode.hActive, mode.vActive, framing)) {
             convertedWidth_ = mode.hActive;
             convertedHeight_ = mode.vActive;

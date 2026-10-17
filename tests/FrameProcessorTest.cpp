@@ -2,6 +2,7 @@
 #include "core/FrameFields.h"
 #include "core/FrameMailbox.h"
 #include "core/FrameProcessor.h"
+#include "core/ScalingExecutor.h"
 #include "core/FrameSequence.h"
 #include "core/Modeline.h"
 #include "core/ModelineCatalog.h"
@@ -24,6 +25,7 @@ using namespace mistercast;
 
 class CoreTest final : public QObject {
     Q_OBJECT
+    ScalingExecutor executor_{1};
 
 private slots:
     void bgrIdentity();
@@ -60,7 +62,7 @@ void CoreTest::bgrIdentity()
     const SourceFrame frame{
         source.data(), kDefaultModeline.hActive, kDefaultModeline.vActive,
         static_cast<std::int32_t>(kDefaultModeline.hActive * 3), PixelFormat::Bgr};
-    QVERIFY(FrameProcessor::convertToBgr(
+    QVERIFY(FrameProcessor::convertToBgr(executor_,
         frame, destination, kDefaultModeline.hActive, kDefaultModeline.vActive));
     QVERIFY(std::equal(source.begin(), source.end(), destination.begin()));
 }
@@ -78,7 +80,7 @@ void CoreTest::rgbConversion()
     const SourceFrame frame{
         source.data(), kDefaultModeline.hActive, kDefaultModeline.vActive,
         static_cast<std::int32_t>(kDefaultModeline.hActive * 4), PixelFormat::Rgbx};
-    QVERIFY(FrameProcessor::convertToBgr(
+    QVERIFY(FrameProcessor::convertToBgr(executor_,
         frame, destination, kDefaultModeline.hActive, kDefaultModeline.vActive));
     QCOMPARE(destination[0], std::uint8_t{30});
     QCOMPARE(destination[1], std::uint8_t{20});
@@ -99,7 +101,7 @@ void CoreTest::wideSourceCropsToFourByThree()
     std::vector<std::uint8_t> destination(kDefaultModeline.fullFrameBytes());
     const SourceFrame frame{
         source.data(), width, height, static_cast<std::int32_t>(width * 3), PixelFormat::Bgr};
-    QVERIFY(FrameProcessor::convertToBgr(
+    QVERIFY(FrameProcessor::convertToBgr(executor_,
         frame, destination, kDefaultModeline.hActive, kDefaultModeline.vActive));
     QCOMPARE(destination[0], std::uint8_t{80});
 }
@@ -116,7 +118,7 @@ void CoreTest::flip180()
         static_cast<std::int32_t>(kDefaultModeline.hActive * 3), PixelFormat::Bgr};
     FramingSettings crop;
     crop.rotation = Rotation::Flip180;
-    QVERIFY(FrameProcessor::convertToBgr(
+    QVERIFY(FrameProcessor::convertToBgr(executor_,
         frame, destination, kDefaultModeline.hActive, kDefaultModeline.vActive, crop));
     QCOMPARE(destination[0], std::uint8_t{20});
     QCOMPARE(destination[lastPixel], std::uint8_t{10});
@@ -135,7 +137,7 @@ void CoreTest::quarterTurnRotations()
     std::array<std::uint8_t, width * height * 3> destination{};
     FramingSettings crop;
     crop.rotation = Rotation::Clockwise90;
-    QVERIFY(FrameProcessor::convertToBgr(frame, destination, 4, 3, crop));
+    QVERIFY(FrameProcessor::convertToBgr(executor_, frame, destination, 4, 3, crop));
     const std::array<std::uint8_t, 12> clockwise{
         9, 6, 3, 0,
         10, 7, 4, 1,
@@ -146,7 +148,7 @@ void CoreTest::quarterTurnRotations()
     }
 
     crop.rotation = Rotation::CounterClockwise90;
-    QVERIFY(FrameProcessor::convertToBgr(frame, destination, 4, 3, crop));
+    QVERIFY(FrameProcessor::convertToBgr(executor_, frame, destination, 4, 3, crop));
     const std::array<std::uint8_t, 12> counterClockwise{
         2, 5, 8, 11,
         1, 4, 7, 10,
@@ -164,7 +166,7 @@ void CoreTest::resizeBgrPreservesWholeFrame()
         7, 8, 9, 10, 11, 12,
     };
     std::array<std::uint8_t, 48> destination{};
-    QVERIFY(FrameProcessor::resizeBgr(source, 2, 2, destination, 4, 4));
+    QVERIFY(FrameProcessor::resizeBgr(executor_, source, 2, 2, destination, 4, 4));
     QCOMPARE(destination[0], std::uint8_t{1});
     QCOMPARE(destination[9], std::uint8_t{4});
     QCOMPARE(destination[36], std::uint8_t{7});

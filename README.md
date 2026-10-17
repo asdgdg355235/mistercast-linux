@@ -52,7 +52,11 @@ Choose the CRT output mode before streaming. On first launch, the bundled preset
 
 Interlaced modes alternate odd and even source lines into field-sized network payloads and synchronize the field phase with MiSTer status acknowledgements. Timing values shown in the GUI are read-only and come directly from the selected modeline.
 
-The source is center-cropped to 4:3 by default. The **Framing** group provides alignment, offsets, rotation, & a **Scaling** selector. **Nearest** remains the default & preserves hard pixel edges. **Bilinear** interpolates between neighboring pixel centers. **Area** averages pixel coverage when shrinking & uses bilinear interpolation on enlarging axes. Framing changes apply to subsequent captured frames without restarting capture or streaming. The selected scaler is saved between launches & also applies to the temporary frame shown during output-mode changes. The streaming path retains only the newest frame; it never queues stale video to improve apparent smoothness.
+The source is center-cropped to 4:3 by default. The **Framing** group provides alignment, offsets, rotation, & a **Scaling** selector. **Nearest** remains the default & preserves hard pixel edges. **Bilinear** interpolates between neighboring pixel centers. **Area** averages pixel coverage when shrinking & uses bilinear interpolation on enlarging axes. **LANCIR (Lanczos-3)** uses Aleksey Vaneev's [AVIR project](https://github.com/avaneev/avir) implementation with its default Lanczos-3 filter. Framing changes apply to subsequent captured frames without restarting capture or streaming. The selected scaler is saved between launches & also applies to the temporary frame shown during output-mode changes. The streaming path retains only the newest frame; it never queues stale video to improve apparent smoothness.
+
+Image scaling uses a persistent multicore worker pool for all four algorithms. Its worker count comes from `std::thread::hardware_concurrency()`, with one worker when the reported count is zero. Each frame is divided into disjoint row ranges & completed before publication. The same pool handles output-mode resizing.
+
+AVIR image resizing algorithm designed by Aleksey Vaneev. LANCIR 3.1.1 is vendored from AVIR commit `f29c2e2783d6aeb276c413f45784660f00c13be5` under the MIT license. The original header & license are in `third_party/avir/`; the AVIR license is also installed with MiSTerCast documentation. MiSTerCast's own license remains the Unlicense.
 
 Network audio must also be enabled in the Groovy_MiSTer core OSD. The GUI warns if MiSTer acknowledgements report audio disabled.
 
@@ -75,3 +79,15 @@ The currently active desktop compositor determines how early a rendered frame be
 - If the source chooser does not open, verify that `xdg-desktop-portal` and the compositor-specific backend are running.
 - If output audio is missing, check the default PipeWire sink with `wpctl status`, verify that a session manager such as WirePlumber is running, and enable network audio in the core OSD.
 - If diagnostics show UDP queue growth, repeated drops, pacing overruns, fallback, unsynced, or queue-empty samples, verify both Ethernet ports with `ethtool`. A damaged cable or 100 Mb/s switch port cannot sustain high-resolution video payloads.
+
+## Scaling benchmark
+
+An optional benchmark measures completed 1920x1440 to 720x576 BGR resize operations, including worker dispatch & completion. It compares one worker with the specified count after warm-up. It is excluded from normal builds & CTest.
+
+```sh
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DMISTERCAST_BUILD_BENCHMARKS=ON
+cmake --build build --target scaler_benchmark
+./build/scaler_benchmark 8 30
+```
+
+The arguments are worker count & measured iterations. Defaults use hardware concurrency & 30 iterations. Results depend on the host, available CPU time, & source/output dimensions.

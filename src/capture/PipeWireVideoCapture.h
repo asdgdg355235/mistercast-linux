@@ -2,6 +2,7 @@
 
 #include "core/FrameMailbox.h"
 #include "core/FrameProcessor.h"
+#include "core/ScalingExecutor.h"
 #include "core/Modeline.h"
 
 #include <QObject>
@@ -63,6 +64,8 @@ private:
     ModeEpoch modeEpoch_{1};
     std::array<std::uint8_t, kMaximumFrameBytes> converted_{};
     std::array<std::uint8_t, kMaximumFrameBytes> previousConverted_{};
+    // Both conversion paths hold frameMutex_ through executor completion.
+    ScalingExecutor scalingExecutor_;
     std::mutex frameMutex_;
     std::uint16_t convertedWidth_{};
     std::uint16_t convertedHeight_{};

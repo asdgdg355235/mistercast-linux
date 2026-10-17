@@ -10,12 +10,15 @@
 
 namespace mistercast {
 
-enum class ScalingAlgorithm { Nearest, Bilinear, Area };
+enum class ScalingAlgorithm { Nearest, Bilinear, Area, LancIR };
+
+enum class ScalerBackend { NativeRows, LancIR };
 
 struct ScalerDescriptor {
     ScalingAlgorithm algorithm;
     std::string_view key;
     std::string_view displayName;
+    ScalerBackend backend{ScalerBackend::NativeRows};
 };
 
 std::span<const ScalerDescriptor> availableScalers();
@@ -30,6 +33,16 @@ struct ScalingGeometry {
     Rotation rotation{};
     std::uint16_t outputWidth{}, outputHeight{};
 };
+
+// Validated physical crop, shared by native kernels and external backends.
+struct ScalingInput {
+    const std::uint8_t* pixels{};
+    std::int64_t stride{};
+    std::uint32_t channels{}, blue{}, red{};
+    bool quarterTurn{};
+};
+bool prepareScalingInput(const SourceFrame& source, const ScalingGeometry& geometry,
+                         ScalingInput& input);
 
 namespace detail {
 // Integer coverage weights. Interior pixels share one weight, so storage is
