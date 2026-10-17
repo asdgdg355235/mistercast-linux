@@ -43,6 +43,8 @@ private:
 
     QLineEdit* hostEdit_{};
     QCheckBox* audioCheck_{};
+    QCheckBox* controllerCheck_{};
+    QLineEdit* mpvIpcEdit_{};
     QCheckBox* diagnosticsCheck_{};
     QComboBox* modelineSelect_{};
     QLabel* timingDetails_{};

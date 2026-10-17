@@ -20,6 +20,12 @@ pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3 libspa-0.2)
 pkg_check_modules(LZ4 REQUIRED IMPORTED_TARGET liblz4)
 
 add_library(mistercast_core
+    src/input/ControllerInput.cpp
+    src/input/ControllerInput.h
+    src/input/ControllerReceiver.cpp
+    src/input/ControllerReceiver.h
+    src/input/MpvIpc.cpp
+    src/input/MpvIpc.h
     src/core/AudioFrameCadence.h
     src/core/FrameFields.cpp
     src/core/FrameFields.h
@@ -106,6 +112,12 @@ if(BUILD_TESTING)
     target_compile_options(scaling_executor_test PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME scaling_executor COMMAND scaling_executor_test)
     set_tests_properties(scaling_executor PROPERTIES TIMEOUT 60 LABELS "unit;concurrency")
+
+    add_executable(controller_input_test tests/ControllerInputTest.cpp)
+    target_link_libraries(controller_input_test PRIVATE mistercast_core)
+    target_compile_options(controller_input_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME controller_input COMMAND controller_input_test)
+    set_tests_properties(controller_input PROPERTIES TIMEOUT 15 LABELS "unit;integration")
 
     add_executable(scaler_test tests/ScalerTest.cpp src/ui/ScalingSelector.cpp)
     set_target_properties(scaler_test PROPERTIES AUTOMOC ON)

@@ -91,3 +91,9 @@ cmake --build build --target scaler_benchmark
 ```
 
 The arguments are worker count & measured iterations. Defaults use hardware concurrency & 30 iterations. Results depend on the host, available CPU time, & source/output dimensions.
+
+## Optional mpv controller controls
+
+MiSTer controllers can control an external mpv player's JSON IPC socket while
+streaming. This is disabled by default. See [setup, bindings, protocol references
+& tests](docs/mpv-controller.md).

@@ -24,7 +24,8 @@ public:
     ~StreamingCoordinator() override;
 
     void selectSource();
-    void startStreaming(std::string host, bool audioEnabled);
+    void startStreaming(std::string host, bool audioEnabled,
+                        bool controllerEnabled = false, std::string mpvIpcPath = {});
     void stopStreaming();
     void shutdown();
     void setOutputMode(const Modeline& modeline);
