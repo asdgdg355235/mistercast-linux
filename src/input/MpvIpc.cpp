@@ -89,7 +89,7 @@ bool MpvIpc::service(Clock::time_point now, std::string& error)
     for (int reads = 0; reads < 8; ++reads) {
         char buffer[1024];
         const auto n = ::recv(fd_, buffer, sizeof(buffer), MSG_DONTWAIT);
-        if (n == 0) return fail("mpv exited or closed its IPC connection; restart streaming to reconnect");
+        if (n == 0) return fail("mpv exited or closed its IPC connection; retrying");
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) break;
             return fail("mpv IPC receive failed");
@@ -103,14 +103,14 @@ bool MpvIpc::service(Clock::time_point now, std::string& error)
         }
     }
     if (!pending_.empty() && now - pending_.begin()->second >= ReplyTimeout)
-        return fail("mpv IPC reply timed out; controls stopped until streaming restarts");
+        return fail("mpv IPC reply timed out; retrying connection");
     return true;
 }
 bool MpvIpc::send(PlaybackAction action, Clock::time_point now, std::string& error)
 {
     if (!ready()) return true; // No queue while connecting.
     if (pending_.size() >= MaxInFlight) {
-        error = "mpv IPC has 16 unanswered commands; controls stopped until streaming restarts";
+        error = "mpv IPC has 16 unanswered commands; retrying connection";
         close();
         return false;
     }
@@ -120,7 +120,7 @@ bool MpvIpc::send(PlaybackAction action, Clock::time_point now, std::string& err
     const auto n = ::send(fd_, line.data(), line.size(), MSG_DONTWAIT | MSG_NOSIGNAL);
     if (n != static_cast<ssize_t>(line.size())) {
         // No retry of a partial command: reconnecting could duplicate an action.
-        error = "mpv IPC write failed or stalled; controls stopped until streaming restarts";
+        error = "mpv IPC write failed or stalled; retrying connection";
         close();
         return false;
     }

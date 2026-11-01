@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <cstring>
 #include <netdb.h>
+#include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -58,15 +59,20 @@ bool ControllerReceiver::start(const std::string& host, const std::string& ipcPa
         error = "Cannot register controller receiver: " + std::string(std::strerror(errno));
         return false;
     }
+    sockaddr_in local{};
+    socklen_t localLength = sizeof(local);
+    const auto localPort = ::getsockname(socket.fd, reinterpret_cast<sockaddr*>(&local), &localLength) == 0
+        ? ntohs(local.sin_port) : 0;
     try {
-        thread_ = std::jthread([this, fd = socket.fd, ipcPath, warning = std::move(warning)](std::stop_token stop) {
+        thread_ = std::jthread([this, fd = socket.fd, ipcPath, host, port, localPort, warning = std::move(warning)](std::stop_token stop) {
             Socket udp{fd};
             ControllerInput input;
             MpvIpc ipc;
-            bool connected = false, opened = false, warned = false, wasReady = false;
+            bool opened = false, warned = false, wasReady = false;
             auto retryAt = ControllerInput::Clock::time_point{};
             auto inactiveSince = ControllerInput::Clock::now();
             bool received = false, inputWarning = false;
+            std::uint64_t datagrams = 0, malformed = 0, stale = 0, accepted = 0;
             while (!stop.stop_requested()) {
                 const auto now = ControllerInput::Clock::now();
                 std::string message;
@@ -76,18 +82,23 @@ bool ControllerReceiver::start(const std::string& host, const std::string& ipcPa
                     if (!opened && !warned) { warning(message); warned = true; }
                 }
                 if (opened && !ipc.service(now, message)) {
-                    if (connected) { warning(message); break; }
                     opened = false;
                     if (!warned) { warning(message); warned = true; }
                 }
-                if (ipc.ready() && !wasReady) input.suppressHeld();
+                if (ipc.ready() && !wasReady) { input.suppressHeld(); warned = false; }
                 wasReady = ipc.ready();
-                connected = connected || ipc.ready();
                 auto dispatch = [&](const std::vector<PlaybackAction>& actions) {
                     if (!active_ || !ipc.ready()) return true;
                     for (auto action : actions) {
                         if (stop.stop_requested() || !active_) return true;
-                        if (!ipc.send(action, now, message)) { warning(message); return false; }
+                        if (!ipc.send(action, now, message)) {
+                            if (!warned) warning(message);
+                            warned = true;
+                            opened = false;
+                            wasReady = false;
+                            input.suppressHeld();
+                            return true;
+                        }
                     }
                     return true;
                 };
@@ -99,23 +110,31 @@ bool ControllerReceiver::start(const std::string& host, const std::string& ipcPa
                     if (n < 0) {
                         if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) break;
                         warning("Controller UDP receive failed: " + std::string(std::strerror(errno)));
-                        healthy = false;
+                        // Connected UDP can report asynchronous ICMP errors. They
+                        // do not invalidate the socket or require a new port.
+                        if (errno != ECONNREFUSED && errno != EHOSTUNREACH && errno != ENETUNREACH)
+                            healthy = false;
                         break;
                     }
-                    if (n != 9 && n != 17) continue;
+                    ++datagrams;
+                    if (n != 9 && n != 17) { ++malformed; continue; }
                     const auto packet = decodeControllerPacket(std::span(bytes).first(static_cast<std::size_t>(n)));
                     std::vector<PlaybackAction> actions;
                     if (packet && input.update(*packet, now, actions)) {
+                        ++accepted;
                         received = true;
                         inactiveSince = now;
-                    }
+                    } else ++stale;
                     if (!active_ || !ipc.ready()) input.suppressHeld();
                     if (!dispatch(actions)) { healthy = false; break; }
                 }
                 if (!healthy || !dispatch(input.tick(now))) break;
                 if (!inputWarning && now - inactiveSince >= ControllerInput::InputTimeout) {
-                    warning(received ? "Controller input timed out; release held buttons before resuming" :
-                        "No controller packets received; enable Joysticks in Groovy_MiSTer OSD and restart streaming");
+                    warning(std::string(received ? "Controller input timed out; release held buttons before resuming" :
+                        "No newer valid controller snapshots received") +
+                        "; UDP local port " + std::to_string(localPort) + " peer " + host + ":" + std::to_string(port) +
+                        "; datagrams=" + std::to_string(datagrams) + " accepted=" + std::to_string(accepted) +
+                        " malformed=" + std::to_string(malformed) + " stale=" + std::to_string(stale));
                     inputWarning = true;
                 }
                 pollfd p{udp.fd, POLLIN, 0};
