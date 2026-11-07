@@ -57,15 +57,15 @@ with the corresponding capabilities. No rumble or force feedback is advertised.
 | B5/B6 | `BTN_SELECT/START` |
 | B7/B8 | `BTN_TL/TR` |
 | B9/B10 | `BTN_TL2/TR2`, digital triggers |
-| Spare digital bits 14/15 | `BTN_TRIGGER_HAPPY1/2` |
+| L3/R3, bits 14/15 (`0x4000`/`0x8000`) in the updated Groovy fork | `BTN_THUMBL/THUMBR` |
 | Analog LX/LY/RX/RY | `ABS_X/Y/RX/RY`, signed 8-bit, center 0 |
 
 Analog mode advertises -128..127 with no rescaling, fuzz or extra dead zone.
 MiSTer's `joy_analog` applies its configured dead zone before transmission.
 Digital mode advertises X/Y -1..1 mirroring the hat to satisfy gamepad detection;
 it doesn't advertise right-stick axes. Opposing directions resolve to neutral.
-There are no transmitted analog trigger, menu/guide or stick-click fields.
-The spare digital bits are preserved without assigning undocumented meanings.
+There are no transmitted analog trigger or menu/guide fields. Stick clicks use
+the existing digital map; packet lengths remain 9/17 bytes.
 SDL's generic joystick interface exposes the advertised controls. SDL game
 controller mappings, Steam layouts & RetroArch bindings can be configured for
 this named device; compatibility with each application needs host testing.
@@ -214,3 +214,45 @@ then evtest/jstest during streaming. Check combinations, holds longer than the
 normal idle interval, both controllers, a temporary network interruption,
 disconnect while pressed, stream restarts & application restarts. Verify sound
 & picture while exercising controls, including when mpv isn't running.
+
+## L3/R3 reference basis & mapping conventions
+
+Compared against `asdgdg355235/Groovy_MiSTer` commit
+`b0c8bc8a2fb45eed75580fdfb3692d6815d08821`:
+
+* `Groovy.sv`, `CONF_STR`: J1 appends L3/R3 after Button 10;
+  `jn,A,B,X,Y,L,R,L2,R2,Select,Start,L3,R3;` defines automatic defaults.
+* `hps_linux/src/joymapping.cpp`, `read_buttons` / `map_joystick`: `jn`
+  replaces default names; `idx=i+DPAD_COUNT` places L3/R3 at bits 14/15.
+* `hps_linux/src/input.cpp`, `load_core_map` and its caller: an existing saved
+  core mapping is loaded; automatic `map_joystick` is used when none loads.
+  Legacy Groovy map migration preserves existing assignments & fills only
+  empty L3/R3 slots from the system map.
+* `hps_linux/src/user_io.cpp`, `user_io_digital_joystick`: ORs primary & alternate
+  mappings into the bitmask passed to `groovy_send_joystick`.
+* `hps_linux/src/support/groovy/groovy.cpp`, `groovy_send_joystick` /
+  `groovy_send_joysticks`: keeps slot masks & transmits their low 16 bits at
+  bytes 5/6 & 7/8, with eight optional analog bytes.
+* `retroarch/src/input/drivers_joypad/mister_joypad.c`, `mister_pad_get_button`:
+  original B5/B6=Select/Start, B7/B8=L/R, B9/B10=L2/R2 convention.
+
+Linux preserves that original Button 1–10 convention. The newer `jn` default
+instead assigns B5/B6=L/R, B7/B8=L2/R2, B9/B10=Select/Start. Saved per-core
+mappings can determine what a physical control sends, so configuration names
+alone don't prove its effective assignment. Configure the MiSTer core mapping
+or consuming application's bindings if using the newer defaults. No physical
+controller traffic or installed default layout was verified for this change.
+
+`src/input/VirtualGamepad.cpp` changes only the final two key codes to
+`BTN_THUMBL/THUMBR`; the shared capability/event table advertises & emits those
+codes. The mocked harness checks every mask, both slots & both packet modes,
+partial releases, unchanged holds, Button 2/3 independence & shutdown. The
+optional kernel test checks thumb capabilities & press/partial-release events.
+
+L3/R3 correction validation: Release CMake configure & full application build
+passed. CTest recorded 7 passes, 1 environment-blocked failure (`controller_input`
+cannot create its mock Unix socket: `Operation not permitted`) & 1 skip
+(`real_gamepad`: `/dev/uinput` absent). `virtual_gamepad_test` passed directly;
+`real_gamepad_test` returned skip code 77. Physical L3/R3 assignments & real
+kernel event delivery remain unverified. Final diff inspection confirmed the
+first ten Linux key entries retain their original order.

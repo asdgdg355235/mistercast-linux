@@ -8,6 +8,7 @@
 #include <iostream>
 #include <thread>
 #include <cstring>
+#include <array>
 using namespace mistercast;
 using namespace std::chrono_literals;
 int main()
@@ -42,9 +43,28 @@ int main()
         ::ioctl(fd,EVIOCGID,&id)<0 || ::ioctl(fd,EVIOCGABS(ABS_X),&axis)<0 ||
         id.bustype!=BUS_VIRTUAL || axis.minimum!=-128 || axis.maximum!=127) return 1;
     std::cout<<"Actual evdev device: "<<node<<" name="<<name<<" bus="<<id.bustype<<" vendor="<<id.vendor<<" product="<<id.product<<'\n';
+    std::array<unsigned char, (KEY_MAX+8)/8> keys{};
+    if (::ioctl(fd,EVIOCGBIT(EV_KEY,keys.size()),keys.data())<0) return 1;
+    auto advertised=[&](unsigned code){return keys[code/8] & (1u<<(code%8));};
+    if(!advertised(BTN_THUMBL)||!advertised(BTN_THUMBR)||
+        advertised(BTN_TRIGGER_HAPPY1)||advertised(BTN_TRIGGER_HAPPY2))return 1;
+    if(!pad.update({0xc000,{}},error)||!pad.update({0x8000,{}},error)||
+        !pad.update({},error))return 1;
+    std::vector<std::pair<int,int>> clicks;
+    const auto clickDeadline=ControllerInput::Clock::now()+2s;
+    while(clicks.size()<4 && ControllerInput::Clock::now()<clickDeadline) {
+        input_event e[32];const auto n=::read(fd,e,sizeof(e));
+        for(ssize_t i=0;i<n/static_cast<ssize_t>(sizeof(input_event));++i)
+            if(e[i].type==EV_KEY && (e[i].code==BTN_THUMBL||e[i].code==BTN_THUMBR))
+                clicks.emplace_back(e[i].code,e[i].value);
+        if(n<0)std::this_thread::sleep_for(10ms);
+    }
+    if(clicks!=std::vector<std::pair<int,int>>{{BTN_THUMBL,1},{BTN_THUMBR,1},
+        {BTN_THUMBL,0},{BTN_THUMBR,0}})return 1;
+    const auto eventDeadline=ControllerInput::Clock::now()+2s;
     if(!pad.update({0x30,{-128,127,-1,1}},error) || !pad.update({},error))return 1;
     bool press=false,release=false,negative=false,syn=false;
-    while(ControllerInput::Clock::now()<deadline && !(press&&release&&negative&&syn)){
+    while(ControllerInput::Clock::now()<eventDeadline && !(press&&release&&negative&&syn)){
         input_event events[64];
         const auto count=::read(fd,events,sizeof(events));
         for(ssize_t i=0;i<count/static_cast<ssize_t>(sizeof(input_event));++i){

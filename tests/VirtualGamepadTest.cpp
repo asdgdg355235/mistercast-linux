@@ -8,6 +8,7 @@
 #include <poll.h>
 #include <cstdarg>
 #include <algorithm>
+#include <bit>
 #include <fcntl.h>
 #include <cstring>
 #include <iostream>
@@ -116,6 +117,66 @@ void kernelApi()
     check(!pad.create(0,true,"test",error) && error.find("/dev/uinput")!=std::string::npos,"permissions diagnostic");
     failOpen=false;
 }
+// Exercise wire decoding, slot isolation, capabilities and delivery together.
+void allButtonBindings()
+{
+    constexpr std::array expected{BTN_SOUTH, BTN_EAST, BTN_WEST, BTN_NORTH,
+        BTN_SELECT, BTN_START, BTN_TL, BTN_TR, BTN_TL2, BTN_TR2,
+        BTN_THUMBL, BTN_THUMBR};
+    for (bool analog : {false, true}) {
+        std::array<VirtualGamepad, 2> pads;
+        std::array<int, 2> fds{};
+        std::string error;
+        for (unsigned slot=0; slot<2; ++slot) {
+            check(pads[slot].create(slot,analog,"bindings",error),"create binding test pad");
+            fds[slot]=nextFd-1;
+            const auto& keys=devices.at(fds[slot]).keys;
+            check(keys==std::vector<int>(expected.begin(),expected.end()),"all twelve advertised codes in original order; no trigger-happy aliases");
+        }
+        auto deliver=[&](std::uint16_t b0,std::uint16_t b1) {
+            auto packet=decodeControllerPacket(wire(20,1,b0,b1,analog));
+            check(packet.has_value(),"decode binding fixture");
+            for(unsigned slot=0;slot<2;++slot)
+                check(pads[slot].update(gamepadState(*packet,slot),error),"deliver binding state");
+        };
+        for(unsigned slot=0;slot<2;++slot) {
+            auto& events=devices.at(fds[slot]).events;
+            auto& other=devices.at(fds[1-slot]).events;
+            for(unsigned i=0;i<expected.size();++i) {
+                events.clear();other.clear();
+                const auto mask=static_cast<std::uint16_t>(1u<<(i+4));
+                deliver(slot==0?mask:0,slot==1?mask:0);
+                check(hasEvent(events,EV_KEY,expected[i],1),"wire mask press binding");
+                check(std::count_if(events.begin(),events.end(),[](auto e){return e.type==EV_KEY;})==1,"one wire bit produces one button press");
+                check(!std::any_of(other.begin(),other.end(),[](auto e){return e.type==EV_KEY;}),"no crossover between controller slots");
+                const auto count=events.size();
+                deliver(slot==0?mask:0,slot==1?mask:0);
+                check(events.size()==count,"held mask produces no duplicate events");
+                deliver(0,0);
+                check(hasEvent(events,EV_KEY,expected[i],0),"wire mask release binding");
+            }
+            for (auto masks : {std::array<std::uint16_t,2>{0x4000,0x8000},
+                               std::array<std::uint16_t,2>{0x8000,0x4000},
+                               std::array<std::uint16_t,2>{0x0020,0x0040}}) {
+                deliver(slot==0?(masks[0]|masks[1]):0,slot==1?(masks[0]|masks[1]):0);
+                events.clear();
+                deliver(slot==0?masks[1]:0,slot==1?masks[1]:0);
+                const int released=expected[std::countr_zero(masks[0])-4];
+                const int held=expected[std::countr_zero(masks[1])-4];
+                check(hasEvent(events,EV_KEY,released,0) &&
+                    !hasEvent(events,EV_KEY,held,0),"partial release preserves other stick click or Button 2/3");
+                deliver(0,0);
+            }
+        }
+        deliver(0xc000,0xc000);
+        for(unsigned slot=0;slot<2;++slot) {
+            auto& d=devices.at(fds[slot]);d.events.clear();
+            pads[slot].close();
+            check(d.destroyed && hasEvent(d.events,EV_KEY,BTN_THUMBL,0) &&
+                hasEvent(d.events,EV_KEY,BTN_THUMBR,0),"shutdown releases both stick clicks and destroys each pad");
+        }
+    }
+}
 void receiver()
 {
     const int server=::socket(AF_INET,SOCK_DGRAM|SOCK_CLOEXEC,0);
@@ -217,6 +278,6 @@ extern "C" ssize_t __wrap_write(int fd,const void* bytes,size_t size)
 }
 int main()
 {
-    try {unit();kernelApi();receiver();std::cout<<"PASS packet/state, uinput syscall harness, UDP receiver and repeated sessions\n";}
+    try {unit();kernelApi();allButtonBindings();receiver();std::cout<<"PASS packet/state, uinput syscall harness, UDP receiver and repeated sessions\n";}
     catch(const std::exception& e){std::cerr<<"FAIL "<<e.what()<<'\n';return 1;}
 }

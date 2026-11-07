@@ -11,10 +11,10 @@
 
 namespace mistercast {
 namespace {
-// Groovy RetroArch B,A,Y,X,Select,Start,L,R,L2,R2; retain spare wire bits.
+// Preserve Groovy RetroArch B1-B10; the updated fork uses bits 14/15 for L3/R3.
 constexpr std::array keys{BTN_SOUTH, BTN_EAST, BTN_WEST, BTN_NORTH,
     BTN_SELECT, BTN_START, BTN_TL, BTN_TR, BTN_TL2, BTN_TR2,
-    BTN_TRIGGER_HAPPY1, BTN_TRIGGER_HAPPY2};
+    BTN_THUMBL, BTN_THUMBR};
 constexpr std::array axes{ABS_X, ABS_Y, ABS_RX, ABS_RY};
 int hatX(std::uint16_t b) { return !!(b & 1) - !!(b & 2); }
 int hatY(std::uint16_t b) { return !!(b & 4) - !!(b & 8); }
