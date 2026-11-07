@@ -20,6 +20,8 @@ pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3 libspa-0.2)
 pkg_check_modules(LZ4 REQUIRED IMPORTED_TARGET liblz4)
 
 add_library(mistercast_core
+    src/input/VirtualGamepad.cpp
+    src/input/VirtualGamepad.h
     src/input/ControllerInput.cpp
     src/input/ControllerInput.h
     src/input/ControllerReceiver.cpp
@@ -106,6 +108,17 @@ qt_add_resources(mistercast "modelines"
 )
 
 if(BUILD_TESTING)
+    add_executable(real_gamepad_test tests/RealGamepadTest.cpp)
+    target_link_libraries(real_gamepad_test PRIVATE mistercast_core ${CMAKE_DL_LIBS})
+    target_compile_options(real_gamepad_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME real_gamepad COMMAND real_gamepad_test)
+    set_tests_properties(real_gamepad PROPERTIES TIMEOUT 10 SKIP_RETURN_CODE 77 LABELS "hardware;integration")
+    add_executable(virtual_gamepad_test tests/VirtualGamepadTest.cpp)
+    target_link_libraries(virtual_gamepad_test PRIVATE mistercast_core)
+    target_link_options(virtual_gamepad_test PRIVATE -Wl,--wrap=open -Wl,--wrap=close -Wl,--wrap=write -Wl,--wrap=ioctl)
+    target_compile_options(virtual_gamepad_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME virtual_gamepad COMMAND virtual_gamepad_test)
+    set_tests_properties(virtual_gamepad PROPERTIES TIMEOUT 15 LABELS "unit;integration")
     add_executable(scaling_executor_test tests/ScalingExecutorTest.cpp tests/LancIRReference.cpp)
     target_link_libraries(scaling_executor_test PRIVATE mistercast_core)
     target_include_directories(scaling_executor_test SYSTEM PRIVATE third_party/avir)
@@ -168,7 +181,8 @@ install(FILES packaging/mistercast.desktop
     DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
 install(FILES resources/mistercast.svg
     DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
-install(FILES README.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
+install(FILES README.md docs/linux-gamepads.md packaging/70-mistercast-input.rules
+    DESTINATION ${CMAKE_INSTALL_DOCDIR})
 
 install(FILES third_party/avir/LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR}/avir)
 

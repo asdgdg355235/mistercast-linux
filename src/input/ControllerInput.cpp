@@ -23,7 +23,14 @@ std::optional<ControllerPacket> decodeControllerPacket(std::span<const std::uint
     p.order = b[4];
     for (unsigned i = 0; i < 2; ++i)
         p.buttons[i] = std::uint16_t(b[5 + 2 * i]) | (std::uint16_t(b[6 + 2 * i]) << 8);
-    return p; // The optional eight analog bytes have no playback bindings.
+    p.analog = b.size() == 17;
+    if (p.analog)
+        for (unsigned c = 0; c < 2; ++c)
+            for (unsigned a = 0; a < 4; ++a) {
+                const int raw = b[9 + c * 4 + a];
+                p.axes[c][a] = raw < 128 ? raw : raw - 256;
+            }
+    return p;
 }
 std::string_view mpvCommand(PlaybackAction action)
 {

@@ -13,7 +13,8 @@ public:
     ~ControllerReceiver();
     // Register before the streaming CMD_INIT: upstream consumes registration there.
     bool start(const std::string& host, const std::string& ipcPath,
-               Warning warning, std::string& error, std::uint16_t port = Port);
+               Warning warning, std::string& error, std::uint16_t port = Port,
+               bool systemGamepads = false, double blitsPerSecond = 60.0);
     void activate() { active_ = true; }
     void stop();
 private:

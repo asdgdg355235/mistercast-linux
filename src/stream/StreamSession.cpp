@@ -69,6 +69,8 @@ void StreamSession::run(std::stop_token stopToken)
     GroovyMister transport;
 
     std::string error;
+    if (stopToken.stop_requested()) { emit stopped(); return; }
+    if (prepareInput) prepareInput();
     if (!transport.connect(
             config_.host, config_.audioEnabled, config_.modeline, error)) {
         emit failed(QString::fromStdString(error));

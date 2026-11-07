@@ -8,6 +8,7 @@
 #include <QObject>
 
 #include <stop_token>
+#include <functional>
 
 namespace mistercast {
 
@@ -21,6 +22,7 @@ public:
         StreamConfig config);
 
     void run(std::stop_token stopToken);
+    std::function<void()> prepareInput;
 
 signals:
     void started();

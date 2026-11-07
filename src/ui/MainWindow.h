@@ -44,6 +44,7 @@ private:
     QLineEdit* hostEdit_{};
     QCheckBox* audioCheck_{};
     QCheckBox* controllerCheck_{};
+    QCheckBox* gamepadCheck_{};
     QLineEdit* mpvIpcEdit_{};
     QCheckBox* diagnosticsCheck_{};
     QComboBox* modelineSelect_{};

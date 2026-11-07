@@ -97,3 +97,9 @@ The arguments are worker count & measured iterations. Defaults use hardware conc
 MiSTer controllers can control an external mpv player's JSON IPC socket while
 streaming. This is disabled by default. See [setup, bindings, protocol references
 & tests](docs/mpv-controller.md).
+
+## System-wide MiSTer controllers
+
+See [Linux virtual gamepads](docs/linux-gamepads.md) for uinput setup, controls,
+permissions, diagnostics & host verification. The feature works independently
+of mpv while streaming.

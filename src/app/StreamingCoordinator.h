@@ -25,7 +25,8 @@ public:
 
     void selectSource();
     void startStreaming(std::string host, bool audioEnabled,
-                        bool controllerEnabled = false, std::string mpvIpcPath = {});
+                        bool controllerEnabled = false, std::string mpvIpcPath = {},
+                        bool systemGamepads = false);
     void stopStreaming();
     void shutdown();
     void setOutputMode(const Modeline& modeline);

@@ -1,0 +1,9 @@
+# Only members explicitly added to mistercast-input can create virtual devices.
+SUBSYSTEM=="misc", KERNEL=="uinput", GROUP="mistercast-input", MODE="0660", OPTIONS+="static_node=uinput"
+# Grant the local desktop session access to MiSTerCast pads, not physical inputs.
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="MiSTerCast Gamepad *", ENV{ID_INPUT_JOYSTICK}="1", TAG+="uaccess"
+SUBSYSTEM=="input", KERNEL=="js*", ATTRS{name}=="MiSTerCast Gamepad *", TAG+="uaccess"
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="MiSTerCast Gamepad 1", SYMLINK+="input/by-id/mistercast-gamepad-1-event-joystick"
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="MiSTerCast Gamepad 2", SYMLINK+="input/by-id/mistercast-gamepad-2-event-joystick"
+SUBSYSTEM=="input", KERNEL=="js*", ATTRS{name}=="MiSTerCast Gamepad 1", SYMLINK+="input/by-id/mistercast-gamepad-1-joystick"
+SUBSYSTEM=="input", KERNEL=="js*", ATTRS{name}=="MiSTerCast Gamepad 2", SYMLINK+="input/by-id/mistercast-gamepad-2-joystick"

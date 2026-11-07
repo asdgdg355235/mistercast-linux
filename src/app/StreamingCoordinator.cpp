@@ -110,7 +110,7 @@ void StreamingCoordinator::selectSource()
 }
 
 void StreamingCoordinator::startStreaming(std::string host, bool audioEnabled,
-                                          bool controllerEnabled, std::string mpvIpcPath)
+                                          bool controllerEnabled, std::string mpvIpcPath, bool systemGamepads)
 {
     if (!sourceReady_ || controller_.running()) {
         return;
@@ -133,6 +133,7 @@ void StreamingCoordinator::startStreaming(std::string host, bool audioEnabled,
         modeEpoch_,
         controllerEnabled,
         std::move(mpvIpcPath),
+        systemGamepads,
     };
 
     if (!controller_.start(std::move(config))) {

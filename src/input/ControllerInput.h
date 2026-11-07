@@ -19,6 +19,8 @@ struct ControllerPacket {
     std::uint32_t frame{};
     std::uint8_t order{};
     std::array<std::uint16_t, 2> buttons{};
+    bool analog{};
+    std::array<std::array<int, 4>, 2> axes{};
 };
 std::optional<ControllerPacket> decodeControllerPacket(std::span<const std::uint8_t> bytes);
 enum class PlaybackAction { Pause, SeekBack, SeekForward, VolumeUp, VolumeDown, Previous, Next };

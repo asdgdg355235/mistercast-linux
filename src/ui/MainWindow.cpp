@@ -52,9 +52,20 @@ MainWindow::MainWindow(QWidget* parent)
     audioCheck_ = new QCheckBox(QStringLiteral("Capture default output audio (48 kHz stereo)"), connectionGroup);
     audioCheck_->setChecked(settings.value(QStringLiteral("audio"), true).toBool());
     form->addRow(QString(), audioCheck_);
+    gamepadCheck_ = new QCheckBox(QStringLiteral("Forward MiSTer controllers as Linux gamepads"), connectionGroup);
+    gamepadCheck_->setChecked(settings.value(QStringLiteral("systemGamepads"), false).toBool());
+    gamepadCheck_->setToolTip(QStringLiteral("System-wide uinput gamepads during streaming. Replaces direct mpv mappings."));
+    form->addRow(QString(), gamepadCheck_);
     controllerCheck_ = new QCheckBox(QStringLiteral("Control mpv with MiSTer controllers"), connectionGroup);
     controllerCheck_->setChecked(settings.value(QStringLiteral("controllerEnabled"), false).toBool());
     form->addRow(QString(), controllerCheck_);
+    if (gamepadCheck_->isChecked()) controllerCheck_->setChecked(false);
+    connect(gamepadCheck_, &QCheckBox::toggled, this, [this](bool enabled) {
+        if (enabled) controllerCheck_->setChecked(false);
+    });
+    connect(controllerCheck_, &QCheckBox::toggled, this, [this](bool enabled) {
+        if (enabled) gamepadCheck_->setChecked(false);
+    });
     mpvIpcEdit_ = new QLineEdit(connectionGroup);
     mpvIpcEdit_->setPlaceholderText(QStringLiteral("Absolute path passed to mpv --input-ipc-server"));
     mpvIpcEdit_->setText(settings.value(QStringLiteral("mpvIpcPath")).toString());
@@ -311,6 +322,7 @@ void MainWindow::closeEvent(QCloseEvent* event)
     QSettings settings;
     settings.setValue(QStringLiteral("misterHost"), hostEdit_->text().trimmed());
     settings.setValue(QStringLiteral("audio"), audioCheck_->isChecked());
+    settings.setValue(QStringLiteral("systemGamepads"), gamepadCheck_->isChecked());
     settings.setValue(QStringLiteral("controllerEnabled"), controllerCheck_->isChecked());
     settings.setValue(QStringLiteral("mpvIpcPath"), mpvIpcEdit_->text().trimmed());
     settings.setValue(QStringLiteral("horizontalAlignment"), horizontalAlignment_->currentIndex());
@@ -336,7 +348,7 @@ void MainWindow::startStreaming()
     streaming_.startStreaming(
         hostEdit_->text().trimmed().toStdString(),
         audioCheck_->isChecked(), controllerCheck_->isChecked(),
-        mpvIpcEdit_->text().trimmed().toStdString());
+        mpvIpcEdit_->text().trimmed().toStdString(), gamepadCheck_->isChecked());
 
     updateControls();
 }
@@ -370,6 +382,7 @@ void MainWindow::updateControls()
     hostEdit_->setEnabled(!streaming);
     audioCheck_->setEnabled(!streaming);
     controllerCheck_->setEnabled(!streaming);
+    gamepadCheck_->setEnabled(!streaming);
     mpvIpcEdit_->setEnabled(!streaming);
 }
 

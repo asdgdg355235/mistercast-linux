@@ -36,20 +36,21 @@ bool StreamController::start(StreamConfig config)
 
     const auto generation = ++sessionGeneration_;
 
-    if (config.controllerEnabled) {
+    const auto inputConfig = config;
+    session_ = std::make_unique<StreamSession>(
+        mailbox_, audioCapture_, std::move(config));
+    session_->prepareInput = [this, generation, inputConfig] {
+        if (!inputConfig.controllerEnabled && !inputConfig.systemGamepads) return;
         std::string error;
         const auto report = [this, generation](const std::string& message) {
             QMetaObject::invokeMethod(this, [this, generation, message] {
                 if (generation == sessionGeneration_) emit warning(QString::fromStdString(message));
             }, Qt::QueuedConnection);
         };
-        if (!controllerInput_.start(config.host, config.mpvIpcPath, report, error)) {
+        if (!controllerInput_.start(inputConfig.host, inputConfig.mpvIpcPath, report, error,
+                ControllerReceiver::Port, inputConfig.systemGamepads, inputConfig.modeline.cadenceHz()))
             report(error);
-        }
-    }
-
-    session_ = std::make_unique<StreamSession>(
-        mailbox_, audioCapture_, std::move(config));
+    };
 
     // Only an atomic activation flag crosses into the streaming thread.
     connect(session_.get(), &StreamSession::started, this, [this] {

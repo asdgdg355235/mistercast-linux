@@ -14,6 +14,7 @@ struct StreamConfig {
     ModeEpoch modeEpoch;
     bool controllerEnabled{};
     std::string mpvIpcPath;
+    bool systemGamepads{};
 };
 
 } // namespace mistercast
