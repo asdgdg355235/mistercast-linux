@@ -223,13 +223,14 @@ void PipeWireVideoCapture::setFramingSettings(FramingSettings settings)
     framing_ = settings;
 }
 
-ModeEpoch PipeWireVideoCapture::setOutputMode(const Modeline& modeline)
+ModeEpoch PipeWireVideoCapture::setOutputMode(const Modeline& modeline, bool reuseCachedFrame)
 {
     ScalingAlgorithm scaling;
     {
         std::lock_guard lock(framingMutex_);
         scaling = framing_.scaling;
     }
+    std::lock_guard frameLock(frameMutex_);
     ModeEpoch modeEpoch;
     {
         std::lock_guard lock(modeMutex_);
@@ -237,9 +238,9 @@ ModeEpoch PipeWireVideoCapture::setOutputMode(const Modeline& modeline)
         modeEpoch = ModeEpoch{++modeEpoch_.value};
     }
 
-    std::lock_guard lock(frameMutex_);
-
-    if (hasConvertedFrame_) {
+    if (!reuseCachedFrame) {
+        hasConvertedFrame_ = false;
+    } else if (hasConvertedFrame_) {
         if (!convertedFrameIsSynthetic_) {
             const auto previousBytes =
                 static_cast<std::size_t>(convertedWidth_) * convertedHeight_ * 3;

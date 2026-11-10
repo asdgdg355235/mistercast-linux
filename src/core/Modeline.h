@@ -24,6 +24,13 @@ struct Modeline {
     std::uint16_t vTotal{};
     bool interlaced{};
 
+    bool operator==(const Modeline&) const = default;
+
+    [[nodiscard]] double horizontalHz() const
+    {
+        return hTotal == 0 ? 0.0 : pixelClockMHz * 1'000'000.0 / hTotal;
+    }
+
     [[nodiscard]] std::uint16_t payloadHeight() const
     {
         return interlaced ? vActive / 2 : vActive;

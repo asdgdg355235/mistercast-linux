@@ -2,7 +2,7 @@
 
 Low-latency Wayland desktop and PipeWire audio streaming to the Groovy_MiSTer core.
 
-The GUI supports selectable NTSC and PAL CRT modelines from 256x240p through 720x576i.
+The GUI supports automatic CRT timing generation and editable NTSC and PAL presets from 256×240p through 720×576i.
 
 ## Build
 
@@ -48,15 +48,23 @@ Use `./build/mistercast --tone 192.168.1.50` to include a 440 Hz test tone. Netw
 
 Run `./build/mistercast`, choose **Select Desktop Source**, and approve a monitor or window in the compositor portal. Enter the MiSTer address and start streaming. With diagnostics enabled, the GUI reports the median, p95, and maximum age since PipeWire dequeue for newly captured frames, plus the number of output frames that reused an unchanged capture. Capture processing, preflight-ready wait, compression, UDP-capacity wait, and socket-submission time are also reported. Frame age and the component timings are complementary measurements and should not be added together.
 
-Choose the CRT output mode before streaming. On first launch, the bundled presets are copied to the editable user file at `~/.config/MiSTerCast/MiSTerCast/modelines.dat`. Use **Edit File** to open it and **Reload** after making changes. Invalid lines are skipped with a message in the status log. Changing or reloading the selected mode while streaming performs a synchronous transport restart so frames from different modes cannot be mixed.
+### CRT output
 
-Interlaced modes alternate odd and even source lines into field-sized network payloads and synchronize the field phase with MiSTer status acknowledgements. Timing values shown in the GUI are read-only and come directly from the selected modeline.
+**Preloaded / manual modeline** is the default and keeps the saved preset selection. On first launch, MiSTerCast copies the ten bundled modes to `~/.config/MiSTerCast/MiSTerCast/modelines.dat`. Use **Edit File** and **Reload** to update the catalog. Invalid lines appear in the status log.
+
+**Automatic CRT generation** uses Switchres to calculate timings for `ntsc`, `pal`, `generic_15`, `arcade_15`, or a custom CRT range. Set the output dimensions, frame or field rate, scan type, pixel-clock range, and refresh tolerance. **Auto** dimensions use a compatible source size when available. An HD source defaults to 640×480i for NTSC or 720×576i for PAL and uses the selected frame scaler. **Profile default** uses 59.94 Hz for NTSC, generic, and arcade profiles, or 50 Hz for PAL. Custom profiles use the midpoint of their configured cadence range. The timing preview shows the result before MiSTerCast sends the mode.
+
+The NTSC profile allows 15.700–15.760 kHz and 59.7–60.3 Hz. The PAL profile allows 15.575–15.675 kHz and 49.7–50.3 Hz. These are MiSTerCast acceptance ranges around the nominal Switchres TV profiles for integer-line progressive modes and fractional refresh. The two other 15 kHz presets use the upstream ranges. Custom ranges accept horizontal frequency in Hz, frame or field cadence in Hz, horizontal porches in µs, and vertical porches in ms. The calculator uses porch durations as nominal timing values. It accepts horizontal widths down to Switchres's 90% threshold and allows one timing count for vertical rounding. Combined nominal porch and sync duration must stay below 75% of the shortest line or field period in the configured range.
+
+Automatic mode accepts 2.5–25 MHz, keeps the output within 720×576, and checks each porch and sync width against the FPGA's 8-bit timing registers. Interlaced output uses an even active height, an odd full-frame total, and a half-line field offset. The preview reports fields per second for interlaced modes. A requested 59.94 Hz interlaced cadence corresponds to 29.97 complete frames per second. MiSTerCast sends these timings to Groovy_MiSTer without switching the host display.
+
+If generation fails, MiSTerCast tries the selected fallback, the closest compatible catalog entry, then the built-in 320×240p preset. A fallback must pass the same CRT, clock, and refresh checks, match the chosen active height and scan policy, and match any explicit width. The status log identifies rejected candidates and the selected fallback. If no candidate passes, MiSTerCast stops the current stream or blocks startup. When output timing changes, MiSTerCast joins the old sender before changing the capture epoch and opening a fresh Groovy_MiSTer session. The new session starts with fresh pacing, field, and compression state.
 
 The source is center-cropped to 4:3 by default. The **Framing** group provides alignment, offsets, rotation, & a **Scaling** selector. **Nearest** remains the default & preserves hard pixel edges. **Bilinear** interpolates between neighboring pixel centers. **Area** averages pixel coverage when shrinking & uses bilinear interpolation on enlarging axes. **LANCIR (Lanczos-3)** uses Aleksey Vaneev's [AVIR project](https://github.com/avaneev/avir) implementation with its default Lanczos-3 filter. Framing changes apply to subsequent captured frames without restarting capture or streaming. The selected scaler is saved between launches & also applies to the temporary frame shown during output-mode changes. The streaming path retains only the newest frame; it never queues stale video to improve apparent smoothness.
 
 Image scaling uses a persistent multicore worker pool for all four algorithms. Its worker count comes from `std::thread::hardware_concurrency()`, with one worker when the reported count is zero. Each frame is divided into disjoint row ranges & completed before publication. The same pool handles output-mode resizing.
 
-AVIR image resizing algorithm designed by Aleksey Vaneev. LANCIR 3.1.1 is vendored from AVIR commit `f29c2e2783d6aeb276c413f45784660f00c13be5` under the MIT license. The original header & license are in `third_party/avir/`; the AVIR license is also installed with MiSTerCast documentation. MiSTerCast's own license remains the Unlicense.
+AVIR image resizing algorithm designed by Aleksey Vaneev. LANCIR 3.1.1 is vendored from AVIR commit `f29c2e2783d6aeb276c413f45784660f00c13be5` under the MIT license. The original header & license are in `third_party/avir/`; the AVIR license is also installed with MiSTerCast documentation.
 
 Network audio must also be enabled in the Groovy_MiSTer core OSD. The GUI warns if MiSTer acknowledgements report audio disabled.
 
@@ -103,3 +111,7 @@ streaming. This is disabled by default. See [setup, bindings, protocol reference
 See [Linux virtual gamepads](docs/linux-gamepads.md) for uinput setup, controls,
 permissions, diagnostics & host verification. The feature works independently
 of mpv while streaming.
+
+## Licenses
+
+The MiSTerCast build that links Switchres is distributed under GPL-3.0-or-later. The original MiSTerCast files retain the Unlicense, Switchres retains GPL-2.0-or-later, and AVIR retains MIT. See the [Switchres source and license notes](third_party/switchres/README.md) for revision details and binary distribution requirements.

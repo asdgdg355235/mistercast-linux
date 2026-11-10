@@ -31,7 +31,7 @@ public:
         QString& error);
     void stop();
     void setFramingSettings(FramingSettings settings);
-    ModeEpoch setOutputMode(const Modeline& modeline);
+    ModeEpoch setOutputMode(const Modeline& modeline, bool reuseCachedFrame);
 
 signals:
     void started(std::uint32_t width, std::uint32_t height, const QString& format);

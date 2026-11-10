@@ -10,6 +10,22 @@ include(CTest)
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Widgets DBus)
 
 if(BUILD_TESTING)
+    add_executable(crt_modeline_test tests/CrtModelineTest.cpp src/ui/CrtModeControls.cpp)
+    set_target_properties(crt_modeline_test PROPERTIES AUTOMOC ON)
+    target_compile_definitions(crt_modeline_test PRIVATE MISTERCAST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(crt_modeline_test PRIVATE mistercast_core Qt6::Test Qt6::Widgets)
+    target_compile_options(crt_modeline_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME crt_modeline COMMAND crt_modeline_test)
+    set_tests_properties(crt_modeline PROPERTIES TIMEOUT 10 LABELS unit ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+    add_executable(crt_stream_test tests/CrtStreamTest.cpp
+        src/stream/StreamController.cpp src/stream/StreamSession.cpp src/audio/PipeWireAudioCapture.cpp)
+    set_target_properties(crt_stream_test PROPERTIES AUTOMOC ON)
+    target_link_libraries(crt_stream_test PRIVATE mistercast_core Qt6::Test PkgConfig::PIPEWIRE PkgConfig::LZ4)
+    target_compile_options(crt_stream_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME crt_stream COMMAND crt_stream_test)
+    set_tests_properties(crt_stream PROPERTIES TIMEOUT 10 LABELS integration RESOURCE_LOCK groovy_udp_32100)
+
     find_package(Qt6 6.5 REQUIRED COMPONENTS Test)
 endif()
 
@@ -18,6 +34,14 @@ find_package(Threads REQUIRED)
 
 pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3 libspa-0.2)
 pkg_check_modules(LZ4 REQUIRED IMPORTED_TARGET liblz4)
+
+add_library(switchres_calculator STATIC
+    third_party/switchres/modeline.cpp
+    third_party/switchres/monitor.cpp
+    third_party/switchres/log.cpp
+)
+target_include_directories(switchres_calculator SYSTEM PUBLIC third_party/switchres)
+set_target_properties(switchres_calculator PROPERTIES CXX_EXTENSIONS ON POSITION_INDEPENDENT_CODE ON)
 
 add_library(mistercast_core
     src/input/VirtualGamepad.cpp
@@ -29,6 +53,8 @@ add_library(mistercast_core
     src/input/MpvIpc.cpp
     src/input/MpvIpc.h
     src/core/AudioFrameCadence.h
+    src/core/CrtModeline.cpp
+    src/core/CrtModeline.h
     src/core/FrameFields.cpp
     src/core/FrameFields.h
     src/core/Modeline.h
@@ -59,7 +85,7 @@ add_library(mistercast_core
 
 target_include_directories(mistercast_core PUBLIC src)
 target_include_directories(mistercast_core SYSTEM PRIVATE third_party/avir)
-target_link_libraries(mistercast_core PRIVATE PkgConfig::LZ4 PUBLIC Threads::Threads)
+target_link_libraries(mistercast_core PRIVATE PkgConfig::LZ4 switchres_calculator PUBLIC Threads::Threads)
 target_compile_options(mistercast_core PRIVATE -Wall -Wextra -Wpedantic)
 
 add_executable(mistercast
@@ -85,6 +111,8 @@ add_executable(mistercast
     src/stream/StreamSession.h
     src/ui/MainWindow.cpp
     src/ui/MainWindow.h
+    src/ui/CrtModeControls.cpp
+    src/ui/CrtModeControls.h
     src/ui/ScalingSelector.cpp
     src/ui/ScalingSelector.h
     src/main.cpp
@@ -183,8 +211,11 @@ install(FILES resources/mistercast.svg
     DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
 install(FILES README.md docs/linux-gamepads.md packaging/70-mistercast-input.rules
     DESTINATION ${CMAKE_INSTALL_DOCDIR})
+install(FILES COPYING LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR})
 
 install(FILES third_party/avir/LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR}/avir)
+install(FILES third_party/switchres/COPYING third_party/switchres/README.md
+    DESTINATION ${CMAKE_INSTALL_DOCDIR}/switchres)
 
 option(MISTERCAST_BUILD_BENCHMARKS "Build the optional scaler benchmark" OFF)
 if(MISTERCAST_BUILD_BENCHMARKS)

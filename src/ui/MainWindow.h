@@ -17,6 +17,8 @@ class QSpinBox;
 
 namespace mistercast {
 
+class CrtModeControls;
+
 class MainWindow final : public QMainWindow {
     Q_OBJECT
 
@@ -35,8 +37,8 @@ private:
     void updateControls();
     void updateFramingSettings();
     void updateDiagnosticsVisibility();
-    void reloadModelines(bool restartStream);
-    void applySelectedModeline(bool restartStream);
+    void reloadModelines();
+    void applySelectedModeline();
     [[nodiscard]] const Modeline& selectedModeline() const;
 
     StreamingCoordinator streaming_;
@@ -48,6 +50,7 @@ private:
     QLineEdit* mpvIpcEdit_{};
     QCheckBox* diagnosticsCheck_{};
     QComboBox* modelineSelect_{};
+    CrtModeControls* crtModeControls_{};
     QLabel* timingDetails_{};
     QPushButton* editModelinesButton_{};
     QPushButton* reloadModelinesButton_{};

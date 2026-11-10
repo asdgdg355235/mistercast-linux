@@ -1,7 +1,5 @@
 #include "app/StreamingCoordinator.h"
 
-#include "stream/StreamConfig.h"
-
 namespace mistercast {
 
 StreamingCoordinator::StreamingCoordinator(QObject* parent)
@@ -37,8 +35,14 @@ StreamingCoordinator::StreamingCoordinator(QObject* parent)
 
     connect(&videoCapture_, &PipeWireVideoCapture::started, this,
         [this](std::uint32_t width, std::uint32_t height, const QString& format) {
+            const CrtSourceSize size{width, height};
+            const bool changed = sourceSize_ != size;
+            sourceSize_ = size;
             sourceReady_ = true;
             emit sourceStarted(width, height, format);
+            if (automaticMode_ && changed) {
+                resolveOutput(true);
+            }
             emit stateChanged();
         });
 
@@ -70,6 +74,7 @@ StreamingCoordinator::StreamingCoordinator(QObject* parent)
                 return;
             }
             audioCapture_.stop();
+            activeConfig_.reset();
             emit streamStopped();
             emit stateChanged();
         });
@@ -102,8 +107,12 @@ void StreamingCoordinator::selectSource()
     }
 
     sourceReady_ = false;
+    sourceSize_ = {};
 
     videoCapture_.stop();
+    if (automaticMode_) {
+        resolveOutput(true);
+    }
     emit sourceSelectionStarted();
     emit stateChanged();
     portal_.selectSource();
@@ -112,11 +121,19 @@ void StreamingCoordinator::selectSource()
 void StreamingCoordinator::startStreaming(std::string host, bool audioEnabled,
                                           bool controllerEnabled, std::string mpvIpcPath, bool systemGamepads)
 {
-    if (!sourceReady_ || controller_.running()) {
+    if (!sourceReady_ || controller_.running() || !resolveOutput()) {
         return;
     }
 
-    if (audioEnabled) {
+    beginStreaming({
+        std::move(host), audioEnabled, outputMode_, modeEpoch_,
+        controllerEnabled, std::move(mpvIpcPath), systemGamepads,
+    });
+}
+
+void StreamingCoordinator::beginStreaming(StreamConfig config)
+{
+    if (config.audioEnabled) {
         QString error;
         if (!audioCapture_.start(error)) {
             emit failed(error);
@@ -124,21 +141,16 @@ void StreamingCoordinator::startStreaming(std::string host, bool audioEnabled,
         }
     }
 
-    emit streamConnecting(audioEnabled);
-
-    StreamConfig config{
-        std::move(host),
-        audioEnabled,
-        outputMode_,
-        modeEpoch_,
-        controllerEnabled,
-        std::move(mpvIpcPath),
-        systemGamepads,
-    };
+    config.modeline = outputMode_;
+    config.modeEpoch = modeEpoch_;
+    activeConfig_ = config;
+    emit streamConnecting(config.audioEnabled);
 
     if (!controller_.start(std::move(config))) {
         audioCapture_.stop();
+        activeConfig_.reset();
         emit failed(QStringLiteral("Unable to start the stream worker"));
+        emit streamStopped();
     }
 
     emit stateChanged();
@@ -150,6 +162,7 @@ void StreamingCoordinator::stopStreaming()
 
     controller_.stop();
     audioCapture_.stop();
+    activeConfig_.reset();
 
     if (wasStreaming) {
         emit streamStopped();
@@ -167,10 +180,61 @@ void StreamingCoordinator::shutdown()
     sourceReady_ = false;
 }
 
-void StreamingCoordinator::setOutputMode(const Modeline& modeline)
+void StreamingCoordinator::configureOutput(
+    const Modeline& manual, std::optional<CrtRequest> automatic, const std::vector<Modeline>& catalog)
 {
-    outputMode_ = modeline;
-    modeEpoch_ = videoCapture_.setOutputMode(modeline);
+    manualMode_ = manual;
+    automaticMode_ = std::move(automatic);
+    modelines_ = catalog;
+    resolveOutput();
+}
+
+bool StreamingCoordinator::resolveOutput(bool sourceChanged)
+{
+    auto result = selectCrtMode(automaticMode_, manualMode_, modelines_, sourceSize_);
+    for (const auto& message : result.diagnostics) {
+        emit warning(QString::fromStdString(message));
+    }
+    if (!result.mode) {
+        stopStreaming();
+        const auto error = QString::fromStdString(result.error);
+        emit outputModePreview(error);
+        emit failed(error);
+        return false;
+    }
+
+    const auto& mode = *result.mode;
+    const auto label = result.selection == CrtSelection::Fallback
+        ? QStringLiteral("Fallback · %1").arg(QString::fromStdString(mode.name))
+        : QString::fromStdString(mode.name);
+    const auto details = QStringLiteral(
+        "%1 MHz  |  %2 kHz H  |  %3 Hz %4\n"
+        "Active / sync start / sync end / total\nH %5 / %6 / %7 / %8  |  V %9 / %10 / %11 / %12")
+        .arg(mode.pixelClockMHz, 0, 'f', 6)
+        .arg(mode.horizontalHz() / 1000.0, 0, 'f', 5)
+        .arg(mode.cadenceHz(), 0, 'f', 5)
+        .arg(mode.interlaced ? QStringLiteral("interlaced field rate") : QStringLiteral("progressive"))
+        .arg(mode.hActive).arg(mode.hBegin).arg(mode.hEnd).arg(mode.hTotal)
+        .arg(mode.vActive).arg(mode.vBegin).arg(mode.vEnd).arg(mode.vTotal);
+    emit outputModePreview(label + QStringLiteral("  |  ") + details);
+
+    if (mode == outputMode_) {
+        return true;
+    }
+
+    // Join the old sender before changing the capture epoch. The next session
+    // creates fresh encoder, field, and pacing state from the same modeline.
+    auto restart = controller_.running() ? activeConfig_ : std::nullopt;
+    if (restart) {
+        emit warning(QStringLiteral("Restarting the stream for %1").arg(label));
+        stopStreaming();
+    }
+    outputMode_ = mode;
+    modeEpoch_ = videoCapture_.setOutputMode(mode, !sourceChanged);
+    if (restart) {
+        beginStreaming(std::move(*restart));
+    }
+    return true;
 }
 
 void StreamingCoordinator::setFramingSettings(FramingSettings settings)

@@ -1,4 +1,5 @@
 #include "ui/MainWindow.h"
+#include "ui/CrtModeControls.h"
 #include "ui/ScalingSelector.h"
 
 #include "core/ModelineCatalog.h"
@@ -77,6 +78,8 @@ MainWindow::MainWindow(QWidget* parent)
 
     auto* modeGroup = new QGroupBox(QStringLiteral("CRT Output"), central);
     auto* modeLayout = new QVBoxLayout(modeGroup);
+    crtModeControls_ = new CrtModeControls(modeGroup);
+    modeLayout->addWidget(crtModeControls_);
     auto* modeRow = new QHBoxLayout;
     modelineSelect_ = new QComboBox(modeGroup);
     editModelinesButton_ = new QPushButton(QStringLiteral("Edit File"), modeGroup);
@@ -86,6 +89,7 @@ MainWindow::MainWindow(QWidget* parent)
     modeRow->addWidget(reloadModelinesButton_);
     modeLayout->addLayout(modeRow);
     timingDetails_ = new QLabel(modeGroup);
+    timingDetails_->setTextFormat(Qt::PlainText);
     timingDetails_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     timingDetails_->setWordWrap(true);
     modeLayout->addWidget(timingDetails_);
@@ -154,13 +158,13 @@ MainWindow::MainWindow(QWidget* parent)
         QSettings().setValue(QStringLiteral("diagnostics"), enabled);
         updateDiagnosticsVisibility();
     });
-    connect(modelineSelect_, &QComboBox::currentIndexChanged, this,
-        [this] { applySelectedModeline(true); });
+    connect(modelineSelect_, &QComboBox::currentIndexChanged, this, &MainWindow::applySelectedModeline);
+    connect(crtModeControls_, &CrtModeControls::settingsChanged, this, &MainWindow::applySelectedModeline);
+    connect(&streaming_, &StreamingCoordinator::outputModePreview, timingDetails_, &QLabel::setText);
     connect(editModelinesButton_, &QPushButton::clicked, this, [this] {
         QDesktopServices::openUrl(QUrl::fromLocalFile(modelinesPath_));
     });
-    connect(reloadModelinesButton_, &QPushButton::clicked, this,
-        [this] { reloadModelines(true); });
+    connect(reloadModelinesButton_, &QPushButton::clicked, this, &MainWindow::reloadModelines);
     connect(horizontalAlignment_, &QComboBox::currentIndexChanged, this, &MainWindow::updateFramingSettings);
     connect(verticalAlignment_, &QComboBox::currentIndexChanged, this, &MainWindow::updateFramingSettings);
     connect(rotation_, &QComboBox::currentIndexChanged, this, &MainWindow::updateFramingSettings);
@@ -306,7 +310,7 @@ MainWindow::MainWindow(QWidget* parent)
                 .arg(snapshot.queueEmptySamples));
         });
 
-    reloadModelines(false);
+    reloadModelines();
     updateFramingSettings();
     updateDiagnosticsVisibility();
     updateControls();
@@ -395,14 +399,8 @@ void MainWindow::updateDiagnosticsVisibility()
     fpgaStatus_->setVisible(visible);
 }
 
-void MainWindow::reloadModelines(bool restartStream)
+void MainWindow::reloadModelines()
 {
-    const bool wasStreaming = restartStream && streaming_.streaming();
-    
-    if (wasStreaming) {
-        stopStreaming();
-    }
-
     const QString configDirectory =
         QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
 
@@ -426,11 +424,6 @@ void MainWindow::reloadModelines(bool restartStream)
         appendStatus(QStringLiteral("Modeline warning: %1").arg(QString::fromStdString(warning)));
     }
 
-    if (result.modelines.empty()) {
-        appendStatus(QStringLiteral("No valid modelines found; using the built-in 320x240p60 mode"), true);
-        result.modelines.push_back(kDefaultModeline);
-    }
-
     QSettings settings;
     QString selectedName = settings.value(
         QStringLiteral("modeline"), QString::fromStdString(kDefaultModeline.name)).toString();
@@ -445,6 +438,10 @@ void MainWindow::reloadModelines(bool restartStream)
 
     int selectedIndex = 0;
 
+    if (modelines_.empty()) {
+        appendStatus(QStringLiteral("No valid modelines found. The manual selector offers the built-in 320x240p60 mode."), true);
+        modelineSelect_->addItem(QString::fromStdString(kDefaultModeline.name));
+    }
     for (std::size_t i = 0; i < modelines_.size(); ++i) {
         modelineSelect_->addItem(QString::fromStdString(modelines_[i].name));
         if (QString::fromStdString(modelines_[i].name) == selectedName) {
@@ -453,41 +450,21 @@ void MainWindow::reloadModelines(bool restartStream)
     }
 
     modelineSelect_->setCurrentIndex(selectedIndex);
+    crtModeControls_->setCatalog(modelines_);
 
-    applySelectedModeline(false);
+    applySelectedModeline();
     appendStatus(QStringLiteral("Loaded %1 CRT modes from %2")
                      .arg(modelines_.size()).arg(modelinesPath_));
-
-    if (wasStreaming) {
-        startStreaming();
-    }
 }
 
-void MainWindow::applySelectedModeline(bool restartStream)
+void MainWindow::applySelectedModeline()
 {
-    if (modelines_.empty() || modelineSelect_->currentIndex() < 0) {
-        return;
-    }
-
-    const bool wasStreaming = restartStream && streaming_.streaming();
-
-    if (wasStreaming) {
-        stopStreaming();
-    }
-
     const auto& mode = selectedModeline();
-    streaming_.setOutputMode(mode);
-    timingDetails_->setText(QStringLiteral(
-        "%1 MHz  |  H %2 %3 %4 %5  |  V %6 %7 %8 %9  |  payload %10 x %11")
-        .arg(mode.pixelClockMHz, 0, 'f', 3)
-        .arg(mode.hActive).arg(mode.hBegin).arg(mode.hEnd).arg(mode.hTotal)
-        .arg(mode.vActive).arg(mode.vBegin).arg(mode.vEnd).arg(mode.vTotal)
-        .arg(mode.hActive).arg(mode.payloadHeight()));
-    QSettings().setValue(QStringLiteral("modeline"), QString::fromStdString(mode.name));
-
-    if (wasStreaming) {
-        startStreaming();
+    modelineSelect_->setEnabled(!crtModeControls_->automatic());
+    if (!crtModeControls_->automatic()) {
+        QSettings().setValue(QStringLiteral("modeline"), QString::fromStdString(mode.name));
     }
+    streaming_.configureOutput(mode, crtModeControls_->request(), modelines_);
 }
 
 const Modeline& MainWindow::selectedModeline() const

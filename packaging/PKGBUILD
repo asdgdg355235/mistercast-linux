@@ -4,7 +4,7 @@ pkgrel=1
 pkgdesc="Low-latency Wayland desktop streaming to Groovy_MiSTer"
 arch=('x86_64')
 url="https://github.com/iequalshane/MiSTerCast"
-license=('custom:private-use')
+license=('GPL-3.0-or-later')
 depends=('qt6-base' 'pipewire' 'lz4' 'xdg-desktop-portal')
 optdepends=(
     'wireplumber: PipeWire session manager'
