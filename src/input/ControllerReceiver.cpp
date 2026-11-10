@@ -94,11 +94,14 @@ bool ControllerReceiver::start(const std::string& host, const std::string& path,
     if (udp.fd < 0 || ::bind(udp.fd, reinterpret_cast<sockaddr*>(&route), sizeof(route)) < 0) {
         error = "Cannot bind controller receive interface: " + std::string(std::strerror(errno)); return false;
     }
-    // BindInputs sends exactly once before CMD_INIT. Standard UDP setInit
-    // consumes one queued byte; sending periodic registrations would leave
-    // stale endpoints queued for later sessions. There is no registration ACK.
-    const unsigned char registration = 0;
-    if (::sendto(udp.fd, &registration, 1, MSG_NOSIGNAL, reinterpret_cast<sockaddr*>(&peer), sizeof(peer)) != 1) {
+    // Register once before CMD_INIT. Legacy servers consume just the first
+    // byte of this datagram. mpv keeps the original one-byte request.
+    constexpr std::array<std::uint8_t, 1> legacyRegistration{0};
+    const std::span<const std::uint8_t> registration = systemGamepads
+        ? std::span<const std::uint8_t>(TriggerRegistration)
+        : std::span<const std::uint8_t>(legacyRegistration);
+    if (::sendto(udp.fd, registration.data(), registration.size(), MSG_NOSIGNAL,
+                 reinterpret_cast<sockaddr*>(&peer), sizeof(peer)) != static_cast<ssize_t>(registration.size())) {
         error = "UDP registration failed: " + std::string(std::strerror(errno));
         return false;
     }
@@ -206,18 +209,21 @@ bool ControllerReceiver::start(const std::string& host, const std::string& path,
                         continue;
                     }
                     if (n == 37 || n == 41) { ++other; continue; }
-                    if (n != 9 && n != 17) {
+                    const auto packet = n <= static_cast<ssize_t>(bytes.size())
+                        ? decodeControllerPacket(std::span(bytes).first(static_cast<std::size_t>(n)), systemGamepads)
+                        : std::nullopt;
+                    if (!packet) {
                         if (++malformed == 1) notify("Malformed controller datagram: length=" + std::to_string(n));
                         continue;
                     }
                     const auto oldPacket = gamepadInput.packet();
-                    const auto packet = *decodeControllerPacket(std::span(bytes).first(static_cast<std::size_t>(n)));
                     std::vector<PlaybackAction> actions;
-                    if (systemGamepads ? !gamepadInput.update(packet, now) : !input.update(packet, now, actions)) { ++stale; continue; }
+                    if (systemGamepads ? !gamepadInput.update(*packet, now) : !input.update(*packet, now, actions)) { ++stale; continue; }
                     ++valid;
                     lastValid = now;
                     if (valid == 1) notify("Valid controller snapshot received");
-                    if (systemGamepads && (oldPacket.buttons != packet.buttons || oldPacket.axes != packet.axes)) ++transitions;
+                    if (systemGamepads && (oldPacket.buttons != packet->buttons ||
+                        oldPacket.axes != packet->axes || oldPacket.triggers != packet->triggers)) ++transitions;
                     if (!systemGamepads && (input.pressed()[0] || input.pressed()[1] || input.released()[0] || input.released()[1])) ++transitions;
                     if (systemGamepads) syncPads(now);
                     else dispatch(actions);

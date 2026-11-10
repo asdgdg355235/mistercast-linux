@@ -57,6 +57,7 @@ with the corresponding capabilities. No rumble or force feedback is advertised.
 | B5/B6 | `BTN_SELECT/START` |
 | B7/B8 | `BTN_TL/TR` |
 | B9/B10 | `BTN_TL2/TR2`, digital triggers |
+| L2/R2 travel | `ABS_Z` / `ABS_RZ`, unsigned 0–255, released at 0 |
 | L3/R3, bits 14/15 (`0x4000`/`0x8000`) in the updated Groovy fork | `BTN_THUMBL/THUMBR` |
 | Analog LX/LY/RX/RY | `ABS_X/Y/RX/RY`, signed 8-bit, center 0 |
 
@@ -64,8 +65,9 @@ Analog mode advertises -128..127 with no rescaling, fuzz or extra dead zone.
 MiSTer's `joy_analog` applies its configured dead zone before transmission.
 Digital mode advertises X/Y -1..1 mirroring the hat to satisfy gamepad detection;
 it doesn't advertise right-stick axes. Opposing directions resolve to neutral.
-There are no transmitted analog trigger or menu/guide fields. Stick clicks use
-the existing digital map; packet lengths remain 9/17 bytes.
+Both modes expose the trigger axes. Legacy snapshots and digital-only
+controllers drive them to 0 or 255 from the corresponding button bits.
+Stick clicks and digital triggers use the existing digital map.
 SDL's generic joystick interface exposes the advertised controls. SDL game
 controller mappings, Steam layouts & RetroArch bindings can be configured for
 this named device; compatibility with each application needs host testing.
@@ -82,7 +84,7 @@ jstest /dev/input/by-id/mistercast-gamepad-1-joystick
 ```
 
 `real_gamepad_test` creates a temporary pad, discovers its event node through
-sysfs, verifies evdev identity/capabilities/press/release/axis events & checks
+sysfs, verifies evdev identity, capabilities, press/release events, and trigger travel & checks
 SDL2 enumeration, button transitions & axes when that runtime is installed. It skips with exit 77 if
 uinput is absent or inaccessible. The ordinary test suite also runs a syscall
 harness with synthetic packets; that harness doesn't prove kernel behavior.
@@ -90,9 +92,8 @@ harness with synthetic packets; that harness doesn't prove kernel behavior.
 ## Reception & recovery
 
 The receiver resolves the configured host, discovers the routed local interface,
-binds an ephemeral UDP port on that interface & sends a single registration byte
-to the MiSTer's input port 32101. Input is received on that registered ephemeral
-port. Each sender IP/port is checked before decoding. A persistent regular file
+binds an ephemeral UDP port on that interface & sends one registration datagram
+to the MiSTer's input port 32101. Input returns to that ephemeral port. Each sender IP/port is checked before decoding. A persistent regular file
 in `/tmp/mistercast-input-<numeric-address>-<port>.lock`, opened without following
 symlinks & locked with `flock`, prevents competing MiSTerCast receivers. The lock
 is released on close/process exit; its file must remain to avoid inode races.
@@ -108,9 +109,9 @@ registration already queued at MiSTer requires restarting the stream; if the
 queue remains stale, restart Groovy_MiSTer. This source-verified mechanism can
 explain no-traffic symptoms, but it isn't proof of the historical failure.
 
-Packets are full snapshots of both slots: 9 bytes digital or 17 analog. Frame
-serial arithmetic rejects older/duplicate snapshots & accepts 32-bit rollover;
-order must increase within a frame, matching the reference's byte comparison.
+Packets are full snapshots of both slots. Frame serial arithmetic rejects
+older/duplicate snapshots & accepts 32-bit rollover.
+Order must increase within a frame, matching the reference's byte comparison.
 A subsequent full snapshot repairs lost state. Same-frame order wrap & sender
 counter resets have no explicit epoch; reset recovery follows the watchdog or a
 new session. Unchanged holds generate no duplicate Linux events.
@@ -134,6 +135,54 @@ Input runs in a bounded worker outside video/audio & the Qt event loop. A
 forwarding-only connection isn't provided: Groovy input registration requires
 stream initialization & idle keepalives require blits. Sending unverified dummy
 blits or competing with another streamer would change those semantics.
+
+## Analog trigger protocol v1
+
+System gamepads request trigger support by registering with the five bytes
+`47 4d 54 52 01` (`GMTR` followed by version 1). Direct mpv mode still
+registers with a single zero byte. There is no registration reply. An older
+Groovy server accepts the registration and returns its legacy snapshots.
+Updated Groovy uses the extension only for a matching registration in
+**Joysticks: Analog** mode. Each accepted registration sets the format for its
+endpoint.
+
+| Bytes | Contents |
+| --- | --- |
+| 0–3 | Little-endian frame number |
+| 4 | Order within that frame |
+| 5–6 | Little-endian controller 1 button mask |
+| 7–8 | Little-endian controller 2 button mask |
+| 9–12 | Controller 1 signed LX, LY, RX, RY |
+| 13–16 | Controller 2 signed LX, LY, RX, RY |
+| 17–20 | Unsigned controller 1 L2, controller 1 R2, controller 2 L2, controller 2 R2 |
+
+A 9-byte snapshot stops at the button masks. A 17-byte snapshot stops at the
+sticks. A 21-byte snapshot carries the four trigger values. A switch between
+17- and 21-byte snapshots keeps the same virtual devices.
+
+### Deployment & evdev check
+
+1. Update MiSTerCast Linux on `feature/system-gamepads`. It accepts both legacy
+   lengths with the current Groovy server.
+2. Build and install the Groovy HPS program from `feature/analog-triggers`.
+   Select **Joysticks: Analog** in Groovy's OSD. Connect the physical pads with
+   the triggers released, then assign both slots using mapped buttons.
+3. Enable **Forward MiSTer controllers as Linux gamepads**, select **Both**,
+   and start a fresh stream. Use `evtest` on each event node shown above.
+   Hold the four triggers at different positions. Verify the two `EV_ABS`
+   ranges are 0–255 and each trigger reports intermediate values on its own
+   device. Check `BTN_TL2` and `BTN_TR2` still press and release.
+4. Unplug or reassign a pad while its triggers are held. Confirm the released
+   axes report zero. Test **Controller 1**, **Controller 2**, and **Both**,
+   then stop streaming and check that the virtual devices disappear.
+
+The extension follows the original `setInit`, `process_packet_eth`, and
+`groovy_send_joysticks` paths in `psakhis/Groovy_MiSTer`
+`hps_linux/src/support/groovy/groovy.cpp`. The Windows client
+`iequalshane/MiSTerCast` uses one-byte `BindInputs` registration and 9/17-byte
+`PollInputs` in `Library/MiSTerCastLib/groovymister.cpp`.
+[Groovy source](https://github.com/psakhis/Groovy_MiSTer/blob/109908c9ddbd4397ba7aadb193de61fdb8cb34e6/hps_linux/src/support/groovy/groovy.cpp) ·
+[Windows source](https://github.com/iequalshane/MiSTerCast/blob/b7493f91312e1521cb62e4982561505abfc5b4c1/Library/MiSTerCastLib/groovymister.cpp)
 
 ## Diagnostics
 

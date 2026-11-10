@@ -14,6 +14,7 @@ constexpr std::uint16_t Right = 1 << 0, Left = 1 << 1;
 constexpr std::uint16_t Down = 1 << 2, Up = 1 << 3;
 constexpr std::uint16_t Button1 = 1 << 4;
 constexpr std::uint16_t LeftShoulder = 1 << 10, RightShoulder = 1 << 11;
+constexpr std::uint16_t LeftTrigger = 1 << 12, RightTrigger = 1 << 13;
 }
 struct ControllerPacket {
     std::uint32_t frame{};
@@ -21,8 +22,12 @@ struct ControllerPacket {
     std::array<std::uint16_t, 2> buttons{};
     bool analog{};
     std::array<std::array<int, 4>, 2> axes{};
+    std::array<std::array<std::uint8_t, 2>, 2> triggers{};
 };
-std::optional<ControllerPacket> decodeControllerPacket(std::span<const std::uint8_t> bytes);
+// See docs/linux-gamepads.md. Only system gamepads opt in on port 32101.
+inline constexpr std::array<std::uint8_t, 5> TriggerRegistration{'G', 'M', 'T', 'R', 1};
+std::optional<ControllerPacket> decodeControllerPacket(std::span<const std::uint8_t> bytes,
+                                                       bool triggerExtension = false);
 enum class PlaybackAction { Pause, SeekBack, SeekForward, VolumeUp, VolumeDown, Previous, Next };
 std::string_view mpvCommand(PlaybackAction action);
 class ControllerInput {

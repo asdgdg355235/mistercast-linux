@@ -16,6 +16,7 @@ constexpr std::array keys{BTN_SOUTH, BTN_EAST, BTN_WEST, BTN_NORTH,
     BTN_SELECT, BTN_START, BTN_TL, BTN_TR, BTN_TL2, BTN_TR2,
     BTN_THUMBL, BTN_THUMBR};
 constexpr std::array axes{ABS_X, ABS_Y, ABS_RX, ABS_RY};
+constexpr std::array triggerAxes{ABS_Z, ABS_RZ};
 int hatX(std::uint16_t b) { return !!(b & 1) - !!(b & 2); }
 int hatY(std::uint16_t b) { return !!(b & 4) - !!(b & 8); }
 input_event event(unsigned short type, unsigned short code, int value)
@@ -25,7 +26,7 @@ input_event event(unsigned short type, unsigned short code, int value)
 }
 GamepadState gamepadState(const ControllerPacket& p, unsigned slot)
 {
-    GamepadState s{p.buttons.at(slot), p.axes.at(slot)};
+    GamepadState s{p.buttons.at(slot), p.axes.at(slot), p.triggers.at(slot)};
     if (!p.analog) s.axes = {hatX(s.buttons), hatY(s.buttons), 0, 0};
     return s;
 }
@@ -40,6 +41,9 @@ std::vector<input_event> gamepadEvents(const GamepadState& old, const GamepadSta
     if (hatY(old.buttons) != hatY(s.buttons)) out.push_back(event(EV_ABS, ABS_HAT0Y, hatY(s.buttons)));
     for (unsigned a = 0; a < (analog ? 4u : 2u); ++a)
         if (old.axes[a] != s.axes[a]) out.push_back(event(EV_ABS, axes[a], s.axes[a]));
+    for (unsigned a = 0; a < triggerAxes.size(); ++a)
+        if (old.triggers[a] != s.triggers[a])
+            out.push_back(event(EV_ABS, triggerAxes[a], s.triggers[a]));
     if (!out.empty()) out.push_back(event(EV_SYN, SYN_REPORT, 0));
     return out;
 }
@@ -69,6 +73,8 @@ bool VirtualGamepad::create(unsigned slot, bool analog, const std::string& endpo
     if (!enableAxis(ABS_HAT0X, -1, 1) || !enableAxis(ABS_HAT0Y, -1, 1)) return fail();
     for (unsigned a = 0; a < (analog ? 4u : 2u); ++a)
         if (!enableAxis(axes[a], analog ? -128 : -1, analog ? 127 : 1)) return fail();
+    for (auto code : triggerAxes)
+        if (!enableAxis(code, 0, 255)) return fail();
     const auto phys = "mistercast/" + endpoint + "/slot" + std::to_string(slot + 1);
     if (::ioctl(fd_, UI_SET_PHYS, phys.c_str()) < 0) return fail();
     uinput_setup setup{};

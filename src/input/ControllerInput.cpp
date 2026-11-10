@@ -14,22 +14,32 @@ constexpr std::array bindings{
     Binding{RightShoulder, PlaybackAction::Next, false},
 };
 }
-std::optional<ControllerPacket> decodeControllerPacket(std::span<const std::uint8_t> b)
+std::optional<ControllerPacket> decodeControllerPacket(std::span<const std::uint8_t> b,
+                                                       bool triggerExtension)
 {
-    if (b.size() != 9 && b.size() != 17) return std::nullopt;
+    const bool extended = triggerExtension && b.size() == 21;
+    if (b.size() != 9 && b.size() != 17 && !extended) return std::nullopt;
     // Do not cast packet storage to native integers: alignment and host endianness vary.
     ControllerPacket p;
     for (unsigned i = 0; i < 4; ++i) p.frame |= std::uint32_t(b[i]) << (8 * i);
     p.order = b[4];
     for (unsigned i = 0; i < 2; ++i)
         p.buttons[i] = std::uint16_t(b[5 + 2 * i]) | (std::uint16_t(b[6 + 2 * i]) << 8);
-    p.analog = b.size() == 17;
+    p.analog = b.size() >= 17;
     if (p.analog)
         for (unsigned c = 0; c < 2; ++c)
             for (unsigned a = 0; a < 4; ++a) {
                 const int raw = b[9 + c * 4 + a];
                 p.axes[c][a] = raw < 128 ? raw : raw - 256;
             }
+    for (unsigned c = 0; c < 2; ++c) {
+        if (extended)
+            p.triggers[c] = {b[17 + c * 2], b[18 + c * 2]};
+        else
+            p.triggers[c] = {
+                static_cast<std::uint8_t>(p.buttons[c] & LeftTrigger ? 255 : 0),
+                static_cast<std::uint8_t>(p.buttons[c] & RightTrigger ? 255 : 0)};
+    }
     return p;
 }
 std::string_view mpvCommand(PlaybackAction action)

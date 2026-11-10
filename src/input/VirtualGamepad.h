@@ -9,6 +9,7 @@ namespace mistercast {
 struct GamepadState {
     std::uint16_t buttons{};
     std::array<int, 4> axes{};
+    std::array<std::uint8_t, 2> triggers{};
     bool operator==(const GamepadState&) const = default;
 };
 // Digital mode mirrors the hat onto X/Y at one-bit precision for Linux input_id.

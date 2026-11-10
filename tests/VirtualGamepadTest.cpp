@@ -48,6 +48,14 @@ std::vector<std::uint8_t> wire(std::uint32_t frame, std::uint8_t order, std::uin
     if (analog) { b[9]=128; b[10]=127; b[11]=255; b[12]=1; b[13]=42; b[14]=214; }
     return b;
 }
+std::vector<std::uint8_t> triggerWire(std::uint32_t frame, std::uint8_t order,
+                                    std::uint16_t b0, std::uint16_t b1,
+                                    std::array<std::uint8_t, 4> values)
+{
+    auto bytes = wire(frame, order, b0, b1, true);
+    bytes.insert(bytes.end(), values.begin(), values.end());
+    return bytes;
+}
 void unit()
 {
     auto b=wire(10,1,0x3ff0,0x401,true);
@@ -55,6 +63,20 @@ void unit()
     check(p && p->analog && p->axes[0]==std::array{-128,127,-1,1} && p->axes[1]==std::array{42,-42,0,0}, "signed analog decoding and independent slots");
     for (unsigned n=0;n<100;++n) if(n!=9 && n!=17)
         check(!decodeControllerPacket(std::vector<std::uint8_t>(n)), "malformed length");
+    for (unsigned n=0; n<100; ++n) if (n!=9 && n!=17 && n!=21)
+        check(!decodeControllerPacket(std::vector<std::uint8_t>(n), true), "malformed extended length");
+    const auto extended = triggerWire(10, 1, 0x1000, 0x2000, {23, 140, 221, 255});
+    check(!decodeControllerPacket(extended), "21 bytes require opt-in");
+    const auto decoded = decodeControllerPacket(extended, true);
+    check(decoded && decoded->analog && decoded->frame == 10 && decoded->order == 1 &&
+          decoded->buttons == std::array<std::uint16_t, 2>{0x1000, 0x2000} &&
+          decoded->axes == p->axes && decoded->triggers[0] == std::array<std::uint8_t, 2>{23, 140} &&
+          decoded->triggers[1] == std::array<std::uint8_t, 2>{221, 255}, "extended field offsets and unsigned positions");
+    for (bool analog : {false, true}) {
+        const auto legacy = decodeControllerPacket(wire(10, 1, 0x1000, 0x2000, analog), true);
+        check(legacy && legacy->triggers[0] == std::array<std::uint8_t, 2>{255, 0} &&
+              legacy->triggers[1] == std::array<std::uint8_t, 2>{0, 255}, "legacy digital trigger fallback");
+    }
     auto s=gamepadState(*p,0);
     auto events=gamepadEvents({},s,true);
     check(hasEvent(events,EV_KEY,BTN_SOUTH,1) && hasEvent(events,EV_KEY,BTN_TR2,1), "all digital buttons incl triggers");
@@ -87,6 +109,16 @@ void unit()
     check(input.update(*p,t+198s),"sender reset recovery");
     p->frame=0;
     check(!input.update(*p,t+199s),"reordered old frame");
+    GamepadInput triggers(60s);
+    check(triggers.update(*decoded,t),"first extended snapshot");
+    auto stale = *decoded;
+    stale.triggers = {};
+    check(!triggers.update(stale,t+1s),"reject duplicate extended snapshot");
+    --stale.frame;
+    check(!triggers.update(stale,t+2s) && triggers.packet().triggers == decoded->triggers,
+          "older extended snapshot cannot replace trigger positions");
+    check(triggers.expire(t+60s) && gamepadState(triggers.packet(),0) == GamepadState{} &&
+          gamepadState(triggers.packet(),1) == GamepadState{}, "timeout clears both trigger slots");
     check(controllerTimeout(60)==60s && controllerTimeout(50)==69s && controllerTimeout(30)==105s,"watchdog derivation");
 }
 void kernelApi()
@@ -100,17 +132,27 @@ void kernelApi()
         check(d.created && d.setup.id.bustype==BUS_VIRTUAL && !d.setup.id.vendor && !d.setup.id.product,"virtual identity");
         check(std::string(d.setup.name)=="MiSTerCast Gamepad 1","name");
         check(d.axes.at(ABS_RX).minimum==-128 && d.axes.at(ABS_RX).maximum==127 && d.axes.at(ABS_RX).flat==0,"axis precision/deadzone");
-        check(d.axes.size()==6,"analog capability count");
+        check(d.axes.size()==8,"analog capability count");
+        for (auto code : {ABS_Z, ABS_RZ}) {
+            const auto& axis = d.axes.at(code);
+            check(axis.minimum==0 && axis.maximum==255 && axis.value==0,"trigger capabilities and neutral");
+        }
         check(std::find(d.types.begin(),d.types.end(),EV_SYN)!=d.types.end() &&
               std::find(d.types.begin(),d.types.end(),EV_FF)==d.types.end(),"SYN enabled, no unsupported rumble");
     }
-    GamepadState s{0x30,{-128,127,-1,1}};
+    GamepadState s{0x1030,{-128,127,-1,1},{129,243}};
     check(pad.update(s,error) && pad.update(s,error),"write held");
+    check(hasEvent(devices.at(fd).events,EV_ABS,ABS_Z,129) &&
+          hasEvent(devices.at(fd).events,EV_ABS,ABS_RZ,243) &&
+          hasEvent(devices.at(fd).events,EV_KEY,BTN_TL2,1),"independent axes and digital trigger");
     pad.close();
-    check(devices.at(fd).destroyed && hasEvent(devices.at(fd).events,EV_KEY,BTN_SOUTH,0),"shutdown releases before destroy");
+    check(devices.at(fd).destroyed && hasEvent(devices.at(fd).events,EV_KEY,BTN_SOUTH,0) &&
+          hasEvent(devices.at(fd).events,EV_ABS,ABS_Z,0) &&
+          hasEvent(devices.at(fd).events,EV_ABS,ABS_RZ,0),"shutdown releases before destroy");
     check(pad.create(1,false,"test",error),"digital create");
     fd=nextFd-1;
-    check(devices.at(fd).axes.size()==4 && devices.at(fd).axes.at(ABS_X).maximum==1,"digital no fabricated analog");
+    check(devices.at(fd).axes.size()==6 && devices.at(fd).axes.at(ABS_X).maximum==1 &&
+          !devices.at(fd).axes.contains(ABS_RX),"digital mode keeps stick capabilities");
     failWrite=true;
     check(!pad.update(s,error) && !pad.exists() && devices.at(fd).destroyed,"write failure destroys stale device");
     failWrite=false; failOpen=true;
@@ -193,8 +235,10 @@ void receiver()
         { std::lock_guard lock(mutex); base=nextFd; messages.clear(); }
         if (!receiver.start("127.0.0.1","",report,error,ntohs(address.sin_port),true)) throw std::runtime_error(error);
         pollfd poller{server,POLLIN,0}; check(::poll(&poller,1,1000)>0,"registration received");
-        sockaddr_in client{};size=sizeof(client);char registration[2];
-        check(::recvfrom(server,registration,2,0,reinterpret_cast<sockaddr*>(&client),&size)==1,"one-byte registration");
+        sockaddr_in client{};size=sizeof(client);std::array<std::uint8_t, 6> registration{};
+        check(::recvfrom(server,registration.data(),registration.size(),0,reinterpret_cast<sockaddr*>(&client),&size)==5 &&
+            std::equal(registration.begin(),registration.begin()+5,std::array<std::uint8_t,5>{'G','M','T','R',1}.begin()),
+            "system gamepad registration payload");
         check(!competing.start("127.0.0.1","",report,error,ntohs(address.sin_port),true),"competing receiver must fail before registration");
         auto send=[&](auto b){check(::sendto(server,b.data(),b.size(),0,reinterpret_cast<sockaddr*>(&client),size)==static_cast<ssize_t>(b.size()),"send fixture");};
         receiver.activate();
@@ -204,6 +248,27 @@ void receiver()
         {std::lock_guard lock(mutex);
             check(hasEvent(devices.at(base).events,EV_KEY,BTN_SOUTH,1),"slot0 combination");
             check(!hasEvent(devices.at(base+1).events,EV_KEY,BTN_SOUTH,1),"slot isolation");}
+        send(triggerWire(10,2,0x30,0x800,{31,190,213,67}));
+        waitFor([&]{return hasEvent(devices.at(base+1).events,EV_ABS,ABS_RZ,67);});
+        {
+            std::lock_guard lock(mutex);
+            check(nextFd==base+2,"17 to 21 bytes preserves both devices");
+            check(hasEvent(devices.at(base).events,EV_ABS,ABS_Z,31) &&
+                  hasEvent(devices.at(base).events,EV_ABS,ABS_RZ,190) &&
+                  hasEvent(devices.at(base+1).events,EV_ABS,ABS_Z,213),"both trigger slots reach evdev");
+        }
+        send(triggerWire(10,2,0x30,0x800,{250,251,252,253})); // duplicate
+        send(triggerWire(9,200,0,0,{250,251,252,253})); // stale
+        auto truncated = triggerWire(10,3,0,0,{250,251,252,253});
+        truncated.pop_back();
+        send(truncated);
+        send(triggerWire(10,3,0x30,0x800,{31,191,213,67})); // R2-only motion
+        waitFor([&]{return hasEvent(devices.at(base).events,EV_ABS,ABS_RZ,191);});
+        {
+            std::lock_guard lock(mutex);
+            const auto& e = devices.at(base).events;
+            check(!hasEvent(e,EV_ABS,ABS_Z,250) && nextFd==base+2,"reject stale and truncated triggers without recreating devices");
+        }
         send(wire(9,200,0,0,true)); // stale must not release
         send(std::vector<std::uint8_t>(18));
         send(wire(11,1,0x30,0x800,true)); // unchanged keepalive
@@ -222,25 +287,30 @@ void receiver()
         send(wire(12,1,0,0,true));
         waitFor([&]{return hasEvent(devices.at(base).events,EV_KEY,BTN_SOUTH,0);});
         send(wire(13,1,0x10,0x20,true));
-        send(wire(14,1,0x10,0x20)); // analog-to-digital mode change
-        waitFor([&]{return devices.count(base+3) && hasEvent(devices.at(base+3).events,EV_KEY,BTN_EAST,1);});
+        send(wire(14,1,0x1010,0x2020)); // analog-to-digital mode change
+        waitFor([&]{return devices.count(base+3) &&
+            hasEvent(devices.at(base+3).events,EV_KEY,BTN_EAST,1) &&
+            hasEvent(devices.at(base+3).events,EV_ABS,ABS_RZ,255);});
         {std::lock_guard lock(mutex);
             check(devices.at(base).destroyed && devices.at(base+1).destroyed,"mode recreation releases old pads");
-            check(devices.at(base+2).axes.size()==4,"digital receiver capabilities");}
+            check(devices.at(base+2).axes.size()==6,"digital receiver capabilities");}
         receiver.setGamepadSlots(1);
         waitFor([&]{return devices.at(base+3).destroyed;});
         {
             std::lock_guard lock(mutex);
             check(!devices.at(base+2).destroyed, "controller 1 stays active");
-            check(hasEvent(devices.at(base+3).events, EV_KEY, BTN_EAST, 0),
-                  "disabling controller 2 releases its held button");
+            check(hasEvent(devices.at(base+3).events, EV_KEY, BTN_EAST, 0) &&
+                  hasEvent(devices.at(base+3).events, EV_ABS, ABS_RZ, 0),
+                  "disabling controller 2 releases its held button and trigger");
         }
         receiver.setGamepadSlots(2);
         waitFor([&]{return devices.at(base+2).destroyed && devices.count(base+4) &&
-            hasEvent(devices.at(base+4).events, EV_KEY, BTN_EAST, 1);});
+            hasEvent(devices.at(base+4).events, EV_KEY, BTN_EAST, 1) &&
+            hasEvent(devices.at(base+4).events, EV_ABS, ABS_RZ, 255);});
         receiver.setGamepadSlots(3);
         waitFor([&]{return devices.count(base+5) &&
-            hasEvent(devices.at(base+5).events, EV_KEY, BTN_SOUTH, 1);});
+            hasEvent(devices.at(base+5).events, EV_KEY, BTN_SOUTH, 1) &&
+            hasEvent(devices.at(base+5).events, EV_ABS, ABS_Z, 255);});
         receiver.stop();receiver.stop();
         {
             std::lock_guard lock(mutex);

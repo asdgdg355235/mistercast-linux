@@ -42,11 +42,16 @@ int main()
     if (::ioctl(fd,EVIOCGNAME(sizeof(name)),name)<0 ||
         ::ioctl(fd,EVIOCGID,&id)<0 || ::ioctl(fd,EVIOCGABS(ABS_X),&axis)<0 ||
         id.bustype!=BUS_VIRTUAL || axis.minimum!=-128 || axis.maximum!=127) return 1;
+    for (auto code : {ABS_Z, ABS_RZ}) {
+        if (::ioctl(fd,EVIOCGABS(code),&axis)<0 || axis.minimum!=0 ||
+            axis.maximum!=255 || axis.value!=0) return 1;
+    }
     std::cout<<"Actual evdev device: "<<node<<" name="<<name<<" bus="<<id.bustype<<" vendor="<<id.vendor<<" product="<<id.product<<'\n';
     std::array<unsigned char, (KEY_MAX+8)/8> keys{};
     if (::ioctl(fd,EVIOCGBIT(EV_KEY,keys.size()),keys.data())<0) return 1;
     auto advertised=[&](unsigned code){return keys[code/8] & (1u<<(code%8));};
-    if(!advertised(BTN_THUMBL)||!advertised(BTN_THUMBR)||
+    if(!advertised(BTN_TL2)||!advertised(BTN_TR2)||
+        !advertised(BTN_THUMBL)||!advertised(BTN_THUMBR)||
         advertised(BTN_TRIGGER_HAPPY1)||advertised(BTN_TRIGGER_HAPPY2))return 1;
     if(!pad.update({0xc000,{}},error)||!pad.update({0x8000,{}},error)||
         !pad.update({},error))return 1;
@@ -62,20 +67,27 @@ int main()
     if(clicks!=std::vector<std::pair<int,int>>{{BTN_THUMBL,1},{BTN_THUMBR,1},
         {BTN_THUMBL,0},{BTN_THUMBR,0}})return 1;
     const auto eventDeadline=ControllerInput::Clock::now()+2s;
-    if(!pad.update({0x30,{-128,127,-1,1}},error) || !pad.update({},error))return 1;
+    if(!pad.update({0x3030,{-128,127,-1,1},{73,209}},error) || !pad.update({},error))return 1;
     bool press=false,release=false,negative=false,syn=false;
-    while(ControllerInput::Clock::now()<eventDeadline && !(press&&release&&negative&&syn)){
+    std::vector<std::pair<int,int>> triggerEvents;
+    while(ControllerInput::Clock::now()<eventDeadline &&
+          !(press&&release&&negative&&syn&&triggerEvents.size()==8)){
         input_event events[64];
         const auto count=::read(fd,events,sizeof(events));
         for(ssize_t i=0;i<count/static_cast<ssize_t>(sizeof(input_event));++i){
             const auto& e=events[i];
             if(e.type==EV_KEY && e.code==BTN_SOUTH){press|=e.value==1;release|=e.value==0;}
+            if ((e.type==EV_ABS && (e.code==ABS_Z || e.code==ABS_RZ)) ||
+                (e.type==EV_KEY && (e.code==BTN_TL2 || e.code==BTN_TR2)))
+                triggerEvents.emplace_back(e.code,e.value);
             negative|=e.type==EV_ABS && e.code==ABS_X && e.value==-128;
             syn|=e.type==EV_SYN && e.code==SYN_REPORT;
         }
         if(count<0)std::this_thread::sleep_for(10ms);
     }
     ::close(fd);
+    if (triggerEvents!=std::vector<std::pair<int,int>>{{BTN_TL2,1},{BTN_TR2,1},
+        {ABS_Z,73},{ABS_RZ,209},{BTN_TL2,0},{BTN_TR2,0},{ABS_Z,0},{ABS_RZ,0}}) return 1;
     if(!(press&&release&&negative&&syn)){std::cerr<<"Missing real evdev transitions\n";return 1;}
     void* sdl=::dlopen("libSDL2-2.0.so.0",RTLD_NOW);
     if(sdl){
