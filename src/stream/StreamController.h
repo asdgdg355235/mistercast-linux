@@ -29,6 +29,7 @@ public:
 
     bool start(StreamConfig config);
     void stop();
+    void setGamepadSlots(unsigned mask) { controllerInput_.setGamepadSlots(mask); }
     [[nodiscard]] bool running() const { return running_.load(); }
 
 signals:

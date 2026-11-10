@@ -227,8 +227,26 @@ void receiver()
         {std::lock_guard lock(mutex);
             check(devices.at(base).destroyed && devices.at(base+1).destroyed,"mode recreation releases old pads");
             check(devices.at(base+2).axes.size()==4,"digital receiver capabilities");}
+        receiver.setGamepadSlots(1);
+        waitFor([&]{return devices.at(base+3).destroyed;});
+        {
+            std::lock_guard lock(mutex);
+            check(!devices.at(base+2).destroyed, "controller 1 stays active");
+            check(hasEvent(devices.at(base+3).events, EV_KEY, BTN_EAST, 0),
+                  "disabling controller 2 releases its held button");
+        }
+        receiver.setGamepadSlots(2);
+        waitFor([&]{return devices.at(base+2).destroyed && devices.count(base+4) &&
+            hasEvent(devices.at(base+4).events, EV_KEY, BTN_EAST, 1);});
+        receiver.setGamepadSlots(3);
+        waitFor([&]{return devices.count(base+5) &&
+            hasEvent(devices.at(base+5).events, EV_KEY, BTN_SOUTH, 1);});
         receiver.stop();receiver.stop();
-        {std::lock_guard lock(mutex);check(devices.at(base+2).destroyed && devices.at(base+3).destroyed,"both slots destroyed on stop");}
+        {
+            std::lock_guard lock(mutex);
+            check(devices.at(base+4).destroyed && devices.at(base+5).destroyed,
+                  "both slots destroyed on stop");
+        }
     }
     ::close(server);
 }

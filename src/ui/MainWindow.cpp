@@ -57,11 +57,26 @@ MainWindow::MainWindow(QWidget* parent)
     gamepadCheck_->setChecked(settings.value(QStringLiteral("systemGamepads"), false).toBool());
     gamepadCheck_->setToolTip(QStringLiteral("System-wide uinput gamepads during streaming. Replaces direct mpv mappings."));
     form->addRow(QString(), gamepadCheck_);
+    gamepadSlots_ = new QComboBox(connectionGroup);
+    gamepadSlots_->addItem(QStringLiteral("Both"), 3);
+    gamepadSlots_->addItem(QStringLiteral("Controller 1"), 1);
+    gamepadSlots_->addItem(QStringLiteral("Controller 2"), 2);
+    const auto savedSlots = settings.value(QStringLiteral("gamepadSlots"), 3).toInt();
+    const auto savedIndex = gamepadSlots_->findData(savedSlots);
+    gamepadSlots_->setCurrentIndex(savedIndex < 0 ? 0 : savedIndex);
+    gamepadSlots_->setEnabled(gamepadCheck_->isChecked());
+    form->addRow(QStringLiteral("Active Linux gamepads"), gamepadSlots_);
+    const auto applySlots = [this] {
+        streaming_.setGamepadSlots(gamepadSlots_->currentData().toUInt());
+    };
+    connect(gamepadSlots_, &QComboBox::currentIndexChanged, this, applySlots);
+    applySlots();
     controllerCheck_ = new QCheckBox(QStringLiteral("Control mpv with MiSTer controllers"), connectionGroup);
     controllerCheck_->setChecked(settings.value(QStringLiteral("controllerEnabled"), false).toBool());
     form->addRow(QString(), controllerCheck_);
     if (gamepadCheck_->isChecked()) controllerCheck_->setChecked(false);
     connect(gamepadCheck_, &QCheckBox::toggled, this, [this](bool enabled) {
+        gamepadSlots_->setEnabled(enabled);
         if (enabled) controllerCheck_->setChecked(false);
     });
     connect(controllerCheck_, &QCheckBox::toggled, this, [this](bool enabled) {
@@ -327,6 +342,7 @@ void MainWindow::closeEvent(QCloseEvent* event)
     settings.setValue(QStringLiteral("misterHost"), hostEdit_->text().trimmed());
     settings.setValue(QStringLiteral("audio"), audioCheck_->isChecked());
     settings.setValue(QStringLiteral("systemGamepads"), gamepadCheck_->isChecked());
+    settings.setValue(QStringLiteral("gamepadSlots"), gamepadSlots_->currentData());
     settings.setValue(QStringLiteral("controllerEnabled"), controllerCheck_->isChecked());
     settings.setValue(QStringLiteral("mpvIpcPath"), mpvIpcEdit_->text().trimmed());
     settings.setValue(QStringLiteral("horizontalAlignment"), horizontalAlignment_->currentIndex());

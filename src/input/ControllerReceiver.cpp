@@ -139,8 +139,14 @@ bool ControllerReceiver::start(const std::string& host, const std::string& path,
             auto syncPads = [&](Clock::time_point now) {
                 if (!systemGamepads || !active_ || !gamepadInput.live()) return;
                 const auto& packet = gamepadInput.packet();
+                const auto selected = gamepadSlots_.load();
                 for (unsigned slot = 0; slot < pads.size(); ++slot) {
                     auto& pad = pads[slot];
+                    if ((selected & (1u << slot)) == 0) {
+                        pad.close();
+                        deviceRetry[slot] = {};
+                        continue;
+                    }
                     if (pad.exists() && pad.analog() != packet.analog) pad.close();
                     if (!pad.exists()) {
                         if (now < deviceRetry[slot]) continue;

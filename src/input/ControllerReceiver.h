@@ -17,8 +17,11 @@ public:
                bool systemGamepads = false, double blitsPerSecond = 60.0);
     void activate() { active_ = true; }
     void stop();
+    // Bit 0 selects controller 1 and bit 1 selects controller 2.
+    void setGamepadSlots(unsigned mask) { gamepadSlots_ = mask; }
 private:
     std::jthread thread_;
     std::atomic_bool active_{};
+    std::atomic<unsigned> gamepadSlots_{3};
 };
 } // namespace mistercast

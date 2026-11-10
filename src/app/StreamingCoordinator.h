@@ -28,6 +28,7 @@ public:
                         bool controllerEnabled = false, std::string mpvIpcPath = {},
                         bool systemGamepads = false);
     void stopStreaming();
+    void setGamepadSlots(unsigned mask) { controller_.setGamepadSlots(mask); }
     void shutdown();
     void configureOutput(const Modeline& manual, std::optional<CrtRequest> automatic,
                          const std::vector<Modeline>& catalog);
