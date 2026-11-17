@@ -9,16 +9,19 @@ void FrameMailbox::publish(
     std::uint16_t width,
     std::uint16_t height,
     ModeEpoch modeEpoch,
-    Clock::time_point capturedAt)
+    Clock::time_point capturedAt, FrameProcessing processing)
 {
     if (frame.empty() || frame.size() > latest_.size()) {
         return;
     }
+    const auto publishingAt = Clock::now();
     {
         std::lock_guard lock(mutex_);
         std::copy(frame.begin(), frame.end(), latest_.begin());
+        const auto publishedAt = Clock::now();
+        processing.publication = publishedAt - publishingAt;
         metadata_ = FrameMetadata{
-            frame.size(), width, height, modeEpoch, capturedAt, Clock::now()};
+            frame.size(), width, height, modeEpoch, capturedAt, publishedAt, processing};
         ++sequence_;
     }
     

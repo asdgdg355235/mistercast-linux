@@ -1,4 +1,6 @@
 #include "core/AudioFrameCadence.h"
+#include "core/CrtGeometry.h"
+#include "core/ScalingExecutor.h"
 #include "core/CrtModeline.h"
 #include "stream/GroovyMister.h"
 #include "stream/StreamController.h"
@@ -60,7 +62,7 @@ public:
         QVERIFY(std::ranges::equal(receive(), GroovyProtocolCodec::makeModeSwitchCommand(mode)));
     }
 
-    int receiveField(const Modeline& mode, bool first)
+    int receiveField(const Modeline& mode, bool first, bool* shifted = nullptr)
     {
         const auto blit = receive();
         if ((blit.size() != 12 && blit.size() != 13) || blit[0] != 7 ||
@@ -86,10 +88,14 @@ public:
         std::vector<char> unpacked(mode.payloadBytes());
         if (compressed.size() != size ||
             LZ4_decompress_safe(compressed.data(), unpacked.data(), size, unpacked.size()) !=
-                static_cast<int>(unpacked.size()) ||
-            unpacked.front() != (mode.interlaced ? 2 - field : 1)) {
-            return -1;
+                static_cast<int>(unpacked.size())) return -1;
+        const char original = mode.interlaced ? 2 - field : 1;
+        if (shifted) {
+            *shifted = unpacked.front() == 0;
+            // The first two pixels are new black border pixels in this fixture.
+            if (*shifted && (unpacked[5] != 0 || unpacked[6] != original)) return -1;
         }
+        if ((!shifted || !*shifted) && unpacked.front() != original) return -1;
         return field;
     }
 
@@ -113,12 +119,21 @@ private:
     std::array<std::uint8_t, 2048> packet_{};
 };
 
-void publish(FrameMailbox& mailbox, const Modeline& mode, ModeEpoch epoch)
+void publish(FrameMailbox& mailbox, const Modeline& mode, ModeEpoch epoch,
+             bool shifted = false)
 {
     std::vector<std::uint8_t> frame(mode.fullFrameBytes());
     const std::size_t rowBytes = mode.hActive * 3;
     for (std::size_t row = 0; row < mode.vActive; ++row) {
         std::fill_n(frame.begin() + row * rowBytes, rowBytes, row % 2 + 1);
+    }
+    if (shifted) {
+        const auto plan = CrtGeometryPlan::make(mode, {true, 0, 2});
+        QVERIFY(plan);
+        std::vector<std::uint8_t> output(frame.size());
+        ScalingExecutor executor(2);
+        QVERIFY(executor.applyGeometry(*plan, frame, output));
+        frame.swap(output);
     }
     mailbox.publish(frame, mode.hActive, mode.vActive, epoch);
 }
@@ -168,7 +183,18 @@ void CrtStreamTest::restartWithGeneratedGeometry()
     receiver.receiveMode(pal);
     const auto firstField = receiver.receiveField(pal, true);
     QVERIFY(firstField >= 0);
-    QCOMPARE(receiver.receiveField(pal, false), 1 - firstField);
+    auto previous = receiver.receiveField(pal, false);
+    QCOMPARE(previous, 1 - firstField);
+    publish(*mailbox, pal, newEpoch, true);
+    unsigned shiftedParities = 0;
+    for (int i = 0; i < 8 && shiftedParities != 3; ++i) {
+        bool shifted = false;
+        const auto field = receiver.receiveField(pal, false, &shifted);
+        QCOMPARE(field, 1 - previous); // No new INIT/SWITCHRES, no parity reset.
+        previous = field;
+        if (shifted) shiftedParities |= 1u << field;
+    }
+    QCOMPARE(shiftedParities, 3u);
     controller.stop();
     QVERIFY(receiver.receiveClose());
 

@@ -13,6 +13,17 @@
 
 namespace mistercast {
 
+enum class FrameOrigin { Capture, ModePreview, GeometryRerender };
+
+struct FrameProcessing {
+    FrameOrigin origin{FrameOrigin::Capture};
+    std::uint64_t settingsRevision{};
+    std::chrono::nanoseconds conversion{};
+    std::chrono::nanoseconds geometry{};
+    std::uint64_t failures{};
+    std::chrono::nanoseconds publication{};
+};
+
 struct FrameMetadata {
     std::size_t bytes{};
     std::uint16_t width{};
@@ -20,6 +31,7 @@ struct FrameMetadata {
     ModeEpoch modeEpoch{};
     std::chrono::steady_clock::time_point capturedAt{};
     std::chrono::steady_clock::time_point publishedAt{};
+    FrameProcessing processing{};
 };
 
 enum class FrameReadResult {
@@ -37,7 +49,8 @@ public:
         std::uint16_t width,
         std::uint16_t height,
         ModeEpoch modeEpoch,
-        Clock::time_point capturedAt = Clock::now());
+        Clock::time_point capturedAt = Clock::now(),
+        FrameProcessing processing = {});
     void invalidate();
 
     FrameReadResult waitForLatest(

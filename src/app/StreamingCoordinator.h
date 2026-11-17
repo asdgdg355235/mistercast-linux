@@ -33,6 +33,7 @@ public:
     void configureOutput(const Modeline& manual, std::optional<CrtRequest> automatic,
                          const std::vector<Modeline>& catalog);
     void setFramingSettings(FramingSettings settings);
+    void setGeometrySettings(CrtGeometrySettings settings);
 
     [[nodiscard]] bool sourceReady() const { return sourceReady_; }
     [[nodiscard]] bool streaming() const { return controller_.running(); }
@@ -48,6 +49,7 @@ signals:
     void streamStarted();
     void streamStopped();
     void stateChanged();
+    void outputModeChanged(const Modeline& mode);
     void outputModePreview(const QString& description);
     void failed(const QString& message);
     void warning(const QString& message);

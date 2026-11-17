@@ -62,6 +62,10 @@ If generation fails, MiSTerCast tries the selected fallback, the closest compati
 
 The source is center-cropped to 4:3 by default. The **Framing** group provides alignment, offsets, rotation, & a **Scaling** selector. **Nearest** remains the default & preserves hard pixel edges. **Bilinear** interpolates between neighboring pixel centers. **Area** averages pixel coverage when shrinking & uses bilinear interpolation on enlarging axes. **LANCIR (Lanczos-3)** uses Aleksey Vaneev's [AVIR project](https://github.com/avaneev/avir) implementation with its default Lanczos-3 filter. Framing changes apply to subsequent captured frames without restarting capture or streaming. The selected scaler is saved between launches & also applies to the temporary frame shown during output-mode changes. The streaming path retains only the newest frame; it never queues stale video to improve apparent smoothness.
 
+The **CRT Geometry** panel adjusts H-Size, H-Position, V-Shift & gamma-2.4
+Cabinet V-Size within the active raster. Changes apply while streaming and are
+saved per output timing. See the [control and validation guide](docs/crt-geometry.md).
+
 Image scaling uses a persistent multicore worker pool for all four algorithms. Its worker count comes from `std::thread::hardware_concurrency()`, with one worker when the reported count is zero. Each frame is divided into disjoint row ranges & completed before publication. The same pool handles output-mode resizing.
 
 AVIR image resizing algorithm designed by Aleksey Vaneev. LANCIR 3.1.1 is vendored from AVIR commit `f29c2e2783d6aeb276c413f45784660f00c13be5` under the MIT license. The original header & license are in `third_party/avir/`; the AVIR license is also installed with MiSTerCast documentation.

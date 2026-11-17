@@ -104,7 +104,9 @@ void StreamSession::run(std::stop_token stopToken)
     emit started();
 
     std::array<double, 120> dequeueAgesMs{};
-    std::chrono::nanoseconds totalConversion{};
+    std::chrono::nanoseconds totalConversion{}, totalGeometry{}, maxGeometry{}, totalPublication{};
+    std::uint32_t rerenderedFrames{}, geometrySamples{};
+    double rerenderAgeMs{};
     std::chrono::nanoseconds totalReadyWait{};
     std::chrono::nanoseconds totalCompression{};
     std::chrono::nanoseconds totalCapacityWait{};
@@ -230,11 +232,24 @@ void StreamSession::run(std::stop_token stopToken)
             continue;
         }
 
-        if (capturedNewFrame) {
+        if (capturedNewFrame) totalPublication += frameMetadata.processing.publication;
+        if (capturedNewFrame && frameMetadata.processing.geometry.count() > 0) {
+            totalGeometry += frameMetadata.processing.geometry;
+            maxGeometry = std::max(maxGeometry, frameMetadata.processing.geometry);
+            ++geometrySamples;
+        }
+        if (capturedNewFrame && frameMetadata.processing.origin == FrameOrigin::GeometryRerender) {
+            ++rerenderedFrames;
+            rerenderAgeMs = std::chrono::duration<double, std::milli>(
+                sendStarted - frameMetadata.capturedAt).count();
+        } else if (capturedNewFrame) {
             dequeueAgesMs[capturedFrames] =
                 std::chrono::duration<double, std::milli>(
                     sendStarted - frameMetadata.capturedAt).count();
-            totalConversion += frameMetadata.publishedAt - frameMetadata.capturedAt;
+            totalConversion += frameMetadata.processing.origin == FrameOrigin::ModePreview
+                ? frameMetadata.processing.conversion + frameMetadata.processing.geometry +
+                    frameMetadata.processing.publication
+                : frameMetadata.publishedAt - frameMetadata.capturedAt;
             totalReadyWait += preflightStarted > frameMetadata.publishedAt
                 ? preflightStarted - frameMetadata.publishedAt
                 : std::chrono::nanoseconds{};
@@ -278,6 +293,16 @@ void StreamSession::run(std::stop_token stopToken)
                 .frameNumber = frameNumber,
                 .capturedFrames = capturedFrames,
                 .reusedFrames = reusedFrames,
+                .rerenderedFrames = rerenderedFrames,
+                .processingRevision = frameMetadata.processing.settingsRevision,
+                .processingFailures = frameMetadata.processing.failures,
+                .averageGeometryUs = geometrySamples == 0 ? 0.0 :
+                    std::chrono::duration<double, std::micro>(totalGeometry).count() / geometrySamples,
+                .maximumGeometryUs = std::chrono::duration<double, std::micro>(maxGeometry).count(),
+                .rerenderAgeMs = rerenderAgeMs,
+                .averageVideoPublicationUs = capturedFrames + rerenderedFrames == 0 ? 0.0 :
+                    std::chrono::duration<double, std::micro>(totalPublication).count() /
+                        (capturedFrames + rerenderedFrames),
                 .medianDequeueAgeMs = capturedFrames == 0 ? 0.0 :
                     sortedAges[percentileIndex(0.50, capturedFrames)],
                 .p95DequeueAgeMs = capturedFrames == 0 ? 0.0 :
@@ -341,6 +366,12 @@ void StreamSession::run(std::stop_token stopToken)
             });
 
             totalConversion = {};
+            totalGeometry = {};
+            totalPublication = {};
+            maxGeometry = {};
+            rerenderedFrames = 0;
+            geometrySamples = 0;
+            rerenderAgeMs = 0;
             totalReadyWait = {};
             totalCompression = {};
             totalCapacityWait = {};

@@ -1,5 +1,7 @@
+#include "core/FrameFields.h"
 #include "core/Modeline.h"
 #include "stream/GroovyMister.h"
+#include "core/CrtGeometry.h"
 
 #include <QtTest>
 #include <lz4.h>
@@ -47,6 +49,7 @@ private slots:
     void deltaArithmeticAndSelection();
     void parityHistoryAndResync();
     void geometryAndUnsubmittedHistory();
+    void geometryPixelsUseExistingDeltaBase();
     void deltaUdpRoundTrip_data();
     void deltaUdpRoundTrip();
     void failedSubmissionInvalidatesHistory();
@@ -418,6 +421,40 @@ void GroovyMisterTest::parityHistoryAndResync()
         choice = encoder.prepare(odd, mode, field);
         QVERIFY(!choice.delta);
         QVERIFY(!choice.forcedFull);
+    }
+}
+
+void GroovyMisterTest::geometryPixelsUseExistingDeltaBase()
+{
+    auto mode = testMode;
+    mode.vActive = 128;
+    mode.interlaced = true;
+    auto source = randomField(mode.fullFrameBytes(), 0x79f3cd10);
+    // This 1/64 shrink keeps columns 0..62 and clips the last one.
+    const auto plan = CrtGeometryPlan::make(mode, {true, -1});
+    QVERIFY(plan);
+    std::vector<std::uint8_t> output(source.size());
+    plan->render(source, output, 0, mode.vActive);
+
+    GroovyVideoEncoder encoder;
+    std::vector<std::uint8_t> previous(mode.payloadBytes()), current(previous.size());
+    for (const auto parity : {field0, field1}) {
+        QVERIFY(extractInterlacedField(source, mode, parity, previous));
+        const auto full = encoder.prepare(previous, mode, parity);
+        QVERIFY(!full.delta);
+        encoder.commit(previous, parity, full);
+    }
+    for (const auto parity : {field0, field1}) {
+        QVERIFY(extractInterlacedField(source, mode, parity, previous));
+        QVERIFY(extractInterlacedField(output, mode, parity, current));
+        QVERIFY(current != previous);
+        const auto delta = encoder.prepare(current, mode, parity);
+        QVERIFY(delta.delta);
+        auto received = inflate(delta.payload, current.size());
+        QCOMPARE(received.size(), current.size());
+        reconstruct(received, previous);
+        QCOMPARE(received, current);
+        encoder.commit(current, parity, delta);
     }
 }
 

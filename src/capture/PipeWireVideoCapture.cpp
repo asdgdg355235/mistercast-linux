@@ -1,6 +1,9 @@
 #include "capture/PipeWireVideoCapture.h"
 
 #include <QMetaObject>
+#include <QThread>
+#include <QTimer>
+#include <QDebug>
 
 #include <spa/buffer/meta.h>
 #include <spa/debug/types.h>
@@ -10,6 +13,7 @@
 #include <spa/utils/result.h>
 
 #include <algorithm>
+#include <utility>
 #include <string>
 #include <unistd.h>
 
@@ -45,9 +49,8 @@ bool PipeWireVideoCapture::start(
     std::uint64_t pipeWireSerial,
     QString& error)
 {
+    Q_ASSERT(thread() == QThread::currentThread());
     stop();
-
-    mailbox_.invalidate();
 
     loop_ = pw_thread_loop_new("mistercast-video", nullptr);
     if (loop_ == nullptr) {
@@ -110,11 +113,7 @@ bool PipeWireVideoCapture::start(
     std::array<std::uint8_t, 2048> parameterBuffer{};
     spa_pod_builder builder = SPA_POD_BUILDER_INIT(parameterBuffer.data(), parameterBuffer.size());
     
-    Modeline preferredMode;
-    {
-        std::lock_guard lock(modeMutex_);
-        preferredMode = outputMode_;
-    }
+    const auto preferredMode = settingsSnapshot().raster;
 
     const spa_rectangle preferredSize =
         SPA_RECTANGLE(preferredMode.hActive, preferredMode.vActive);
@@ -164,6 +163,7 @@ bool PipeWireVideoCapture::start(
 
 void PipeWireVideoCapture::stop()
 {
+    Q_ASSERT(thread() == QThread::currentThread());
     running_ = false;
 
     ++generation_;
@@ -202,87 +202,183 @@ void PipeWireVideoCapture::stop()
     format_ = {};
 
     reachedStreamingState_ = false;
-    {
-        std::lock_guard lock(frameMutex_);
+    rerenderPending_ = false;
+    rerenderRetryPending_ = false;
+    std::lock_guard lock(frameMutex_);
+    baseline_.reset();
+    lastPublishedRevision_.reset();
+    geometryPlan_.reset();
+    processingFailures_ = 0;
+    mailbox_.invalidate();
+}
 
-        hasConvertedFrame_ = false;
-        convertedFrameIsSynthetic_ = false;
-
-        convertedWidth_ = 0;
-        convertedHeight_ = 0;
-        cachedConvertedWidth_ = 0;
-        cachedConvertedHeight_ = 0;
-
-        convertedCapturedAt_ = {};
-    }
+PipeWireVideoCapture::ProcessingSettings PipeWireVideoCapture::settingsSnapshot()
+{
+    std::lock_guard lock(settingsMutex_);
+    return settings_;
 }
 
 void PipeWireVideoCapture::setFramingSettings(FramingSettings settings)
 {
-    std::lock_guard lock(framingMutex_);
-    framing_ = settings;
+    std::lock_guard lock(settingsMutex_);
+    settings_.framing = settings;
+    ++settings_.framingRevision;
+    ++settings_.revision;
 }
 
-ModeEpoch PipeWireVideoCapture::setOutputMode(const Modeline& modeline, bool reuseCachedFrame)
+void PipeWireVideoCapture::setGeometrySettings(CrtGeometrySettings geometry)
 {
-    ScalingAlgorithm scaling;
+    Q_ASSERT(thread() == QThread::currentThread());
     {
-        std::lock_guard lock(framingMutex_);
-        scaling = framing_.scaling;
+        std::lock_guard lock(settingsMutex_);
+        geometry = clampCrtGeometry(geometry, settings_.raster);
+        if (settings_.geometry == geometry) return;
+        settings_.geometry = geometry;
+        ++settings_.revision;
     }
+    scheduleRerender();
+}
+
+void PipeWireVideoCapture::scheduleRerender(unsigned retries)
+{
+    Q_ASSERT(thread() == QThread::currentThread());
+    // Only the QObject owner can create/destroy the loop or enqueue work.
+    // Never take the PipeWire loop lock here, including during a retry.
+    if (!running_ || rerenderRetryPending_ || rerenderPending_.exchange(true)) return;
+    const auto generation = generation_.load();
+    // The pending flag gives this request exclusive use of the token until
+    // the callback reads it. Only the wakeup needs to cross the PipeWire queue.
+    rerenderGeneration_.store(generation);
+    const int result = pw_loop_invoke(pw_thread_loop_get_loop(loop_), onRerender,
+        SPA_ID_INVALID, nullptr, 0, false, this);
+    if (result >= 0) return;
+
+    rerenderPending_ = false;
+    if (!retries) {
+        qWarning() << "Unable to queue CRT geometry update:" << spa_strerror(result);
+        return;
+    }
+    rerenderRetryPending_ = true;
+    QTimer::singleShot(4, this, [this, generation, retries] {
+        if (generation != generation_.load()) return;
+        rerenderRetryPending_ = false;
+        scheduleRerender(retries - 1);
+    });
+}
+
+int PipeWireVideoCapture::onRerender(spa_loop*, bool, std::uint32_t, const void*,
+                                    std::size_t, void* userData)
+{
+    auto& self = *static_cast<PipeWireVideoCapture*>(userData);
+    if (self.rerenderGeneration_.load() != self.generation_.load()) return 0;
+    self.rerenderPending_ = false;
+    if (self.running_) self.rerender();
+    return 0;
+}
+
+void PipeWireVideoCapture::rerender()
+{
+    std::lock_guard lock(frameMutex_);
+    const auto settings = settingsSnapshot();
+    if (!baseline_ || baseline_->epoch != settings.epoch ||
+        baseline_->sourceGeneration != sourceGeneration_ ||
+        baseline_->framingRevision != settings.framingRevision ||
+        lastPublishedRevision_ == settings.revision) return;
+    publishConverted(settings, FrameOrigin::GeometryRerender);
+}
+
+ModeEpoch PipeWireVideoCapture::setOutputMode(const Modeline& modeline, bool reuseCachedFrame,
+                                              CrtGeometrySettings geometry)
+{
+    Q_ASSERT(thread() == QThread::currentThread());
     std::lock_guard frameLock(frameMutex_);
-    ModeEpoch modeEpoch;
+    ProcessingSettings settings;
     {
-        std::lock_guard lock(modeMutex_);
-        outputMode_ = modeline;
-        modeEpoch = ModeEpoch{++modeEpoch_.value};
+        std::lock_guard lock(settingsMutex_);
+        settings_.raster.hActive = modeline.hActive;
+        settings_.raster.vActive = modeline.vActive;
+        settings_.raster.interlaced = modeline.interlaced;
+        settings_.geometry = clampCrtGeometry(geometry, modeline);
+        ++settings_.epoch.value;
+        ++settings_.revision;
+        settings = settings_;
     }
 
-    if (!reuseCachedFrame) {
-        hasConvertedFrame_ = false;
-    } else if (hasConvertedFrame_) {
-        if (!convertedFrameIsSynthetic_) {
-            const auto previousBytes =
-                static_cast<std::size_t>(convertedWidth_) * convertedHeight_ * 3;
+    const auto old = std::exchange(baseline_, std::nullopt);
+    lastPublishedRevision_.reset();
+    if (!reuseCachedFrame || !old || old->framingRevision != settings.framingRevision ||
+        old->sourceGeneration != sourceGeneration_ ||
+        !validCrtGeometryRaster(modeline)) return settings.epoch;
 
-            std::copy_n(converted_.begin(), previousBytes, previousConverted_.begin());
-
-            cachedConvertedWidth_ = convertedWidth_;
-            cachedConvertedHeight_ = convertedHeight_;
-        }
-
-        const auto cachedBytes =
-            static_cast<std::size_t>(cachedConvertedWidth_) *
-            cachedConvertedHeight_ * 3;
-
-        auto destination = std::span(converted_).first(modeline.fullFrameBytes());
-        
-        if (FrameProcessor::resizeBgr(
-                scalingExecutor_,
-                std::span(previousConverted_).first(cachedBytes),
-                cachedConvertedWidth_,
-                cachedConvertedHeight_,
-                destination,
-                modeline.hActive,
-                modeline.vActive,
-                scaling)) {
-            convertedWidth_ = modeline.hActive;
-            convertedHeight_ = modeline.vActive;
-            convertedFrameIsSynthetic_ = true;
-            mailbox_.publish(
-                destination,
-                modeline.hActive,
-                modeline.vActive,
-                modeEpoch,
-                convertedCapturedAt_);
-        } else {
-            // A failed worker may have written part of converted_. Do not let
-            // a later mode change treat that buffer as a completed frame.
-            hasConvertedFrame_ = false;
-        }
+    if (!old->synthetic) {
+        std::copy_n(converted_.begin(), std::size_t{old->width} * old->height * 3,
+                    previousConverted_.begin());
+        cachedConvertedWidth_ = old->width;
+        cachedConvertedHeight_ = old->height;
     }
+    const auto startedAt = FrameMailbox::Clock::now();
+    if (FrameProcessor::resizeBgr(scalingExecutor_,
+            std::span(previousConverted_).first(std::size_t{cachedConvertedWidth_} * cachedConvertedHeight_ * 3),
+            cachedConvertedWidth_, cachedConvertedHeight_, converted_,
+            modeline.hActive, modeline.vActive, settings.framing.scaling)) {
+        baseline_ = {settings.epoch, modeline.hActive, modeline.vActive, sourceGeneration_,
+                     settings.framingRevision, old->capturedAt, true};
+        publishConverted(settings, FrameOrigin::ModePreview, FrameMailbox::Clock::now() - startedAt);
+    } else {
+        ++processingFailures_;
+    }
+    return settings.epoch;
+}
 
-    return modeEpoch;
+void PipeWireVideoCapture::publishConverted(const ProcessingSettings& settings, FrameOrigin origin,
+                                             std::chrono::nanoseconds conversion)
+{
+    if (lastPublishedRevision_ && settings.revision < *lastPublishedRevision_) return;
+    const auto& raster = settings.raster;
+    std::span<const std::uint8_t> output = std::span(converted_).first(raster.fullFrameBytes());
+    std::chrono::nanoseconds geometryTime{};
+    if (settings.geometry.effective()) {
+        const auto startedAt = FrameMailbox::Clock::now();
+        if (!geometryPlan_ || plannedEpoch_ != settings.epoch || plannedGeometry_ != settings.geometry) {
+            geometryPlan_ = CrtGeometryPlan::make(raster, settings.geometry);
+            plannedEpoch_ = settings.epoch;
+            plannedGeometry_ = settings.geometry;
+        }
+        if (!geometryPlan_ || !scalingExecutor_.applyGeometry(*geometryPlan_, output, geometryOutput_)) {
+            if (++processingFailures_ == 1) qWarning() << "CRT geometry render failed";
+            return;
+        }
+        output = std::span(geometryOutput_).first(raster.fullFrameBytes());
+        geometryTime = FrameMailbox::Clock::now() - startedAt;
+    }
+    mailbox_.publish(output, raster.hActive, raster.vActive, settings.epoch, baseline_->capturedAt,
+                     {origin, settings.revision, conversion, geometryTime, processingFailures_});
+    lastPublishedRevision_ = settings.revision;
+}
+
+void PipeWireVideoCapture::convertSource(const SourceFrame* source,
+                                         FrameMailbox::Clock::time_point capturedAt)
+{
+    std::lock_guard lock(frameMutex_);
+    const auto settings = settingsSnapshot();
+    const auto& mode = settings.raster;
+    const auto startedAt = FrameMailbox::Clock::now();
+    // Invalidate before writing. A worker can stop after writing a partial raster.
+    baseline_.reset();
+    if (!validCrtGeometryRaster(mode)) {
+        ++processingFailures_;
+        return;
+    }
+    if (!source) {
+        std::fill_n(converted_.begin(), mode.fullFrameBytes(), 0);
+    } else if (!FrameProcessor::convertToBgr(
+            scalingExecutor_, *source, converted_, mode.hActive, mode.vActive, settings.framing)) {
+        ++processingFailures_;
+        return;
+    }
+    baseline_ = {settings.epoch, mode.hActive, mode.vActive, sourceGeneration_,
+                 settings.framingRevision, capturedAt, false};
+    publishConverted(settings, FrameOrigin::Capture, FrameMailbox::Clock::now() - startedAt);
 }
 
 void PipeWireVideoCapture::onStateChanged(
@@ -333,9 +429,14 @@ void PipeWireVideoCapture::handleStateChanged(pw_stream_state state, const char*
 
 void PipeWireVideoCapture::handleParamChanged(std::uint32_t id, const spa_pod* parameter)
 {
-    if (parameter == nullptr || id != SPA_PARAM_Format) {
-        return;
+    if (id != SPA_PARAM_Format) return;
+    {
+        std::lock_guard lock(frameMutex_);
+        ++sourceGeneration_;
+        baseline_.reset();
     }
+    format_ = {};
+    if (!parameter) return;
 
     spa_video_info_raw parsed{};
     if (spa_format_video_raw_parse(parameter, &parsed) < 0) {
@@ -357,6 +458,7 @@ void PipeWireVideoCapture::handleParamChanged(std::uint32_t id, const spa_pod* p
     }
 
     format_ = parsed;
+    qDebug() << "PipeWire capture color range/transfer:" << parsed.color_range << parsed.transfer_function;
 
     std::array<std::uint8_t, 1024> parameterBuffer{};
     spa_pod_builder builder = SPA_POD_BUILDER_INIT(parameterBuffer.data(), parameterBuffer.size());
@@ -423,44 +525,13 @@ void PipeWireVideoCapture::processFrame()
     }
 
     if ((buffer->datas[0].chunk->flags & SPA_CHUNK_FLAG_EMPTY) != 0) {
-        Modeline mode;
-        ModeEpoch modeEpoch;
-        {
-            std::lock_guard lock(modeMutex_);
-            mode = outputMode_;
-            modeEpoch = modeEpoch_;
-        }
-
-        std::lock_guard frameLock(frameMutex_);
-        bool currentMode;
-        {
-            std::lock_guard modeLock(modeMutex_);
-            currentMode = modeEpoch == modeEpoch_;
-        }
-
-        if (currentMode) {
-            std::fill_n(converted_.begin(), mode.fullFrameBytes(), 0);
-            convertedWidth_ = mode.hActive;
-            convertedHeight_ = mode.vActive;
-            hasConvertedFrame_ = true;
-            convertedFrameIsSynthetic_ = false;
-            convertedCapturedAt_ = dequeuedAt;
-            mailbox_.publish(
-                std::span(converted_).first(mode.fullFrameBytes()),
-                mode.hActive,
-                mode.vActive,
-                modeEpoch,
-                dequeuedAt);
-        } else if (currentMode) {
-            hasConvertedFrame_ = false;
-        }
-
+        convertSource(nullptr, dequeuedAt);
         pw_stream_queue_buffer(stream_, latest);
         return;
     }
 
     PixelFormat pixelFormatValue;
-    if (!pixelFormat(format_.format, pixelFormatValue)) {
+    if (!format_.size.width || !format_.size.height || !pixelFormat(format_.format, pixelFormatValue)) {
         pw_stream_queue_buffer(stream_, latest);
         return;
     }
@@ -509,47 +580,7 @@ void PipeWireVideoCapture::processFrame()
         pixelFormatValue,
     };
 
-    FramingSettings framing;
-    {
-        std::lock_guard lock(framingMutex_);
-        framing = framing_;
-    }
-    
-    Modeline mode;
-    ModeEpoch modeEpoch;
-    {
-        std::lock_guard lock(modeMutex_);
-        mode = outputMode_;
-        modeEpoch = modeEpoch_;
-    }
-
-    auto destination = std::span(converted_).first(mode.fullFrameBytes());
-    {
-        std::lock_guard frameLock(frameMutex_);
-        
-        bool currentMode;
-        {
-            std::lock_guard modeLock(modeMutex_);
-            currentMode = modeEpoch == modeEpoch_;
-        }
-
-        if (currentMode && FrameProcessor::convertToBgr(
-                scalingExecutor_,
-                source, destination, mode.hActive, mode.vActive, framing)) {
-            convertedWidth_ = mode.hActive;
-            convertedHeight_ = mode.vActive;
-            hasConvertedFrame_ = true;
-            convertedFrameIsSynthetic_ = false;
-            convertedCapturedAt_ = dequeuedAt;
-            mailbox_.publish(
-                destination,
-                mode.hActive,
-                mode.vActive,
-                modeEpoch,
-                dequeuedAt);
-        }
-    }
-    
+    convertSource(&source, dequeuedAt);
     pw_stream_queue_buffer(stream_, latest);
 }
 

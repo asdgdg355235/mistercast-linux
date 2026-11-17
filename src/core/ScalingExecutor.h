@@ -6,6 +6,8 @@
 
 namespace mistercast {
 
+class CrtGeometryPlan;
+
 // Synchronous, one-frame executor. Source and destination remain caller-owned
 // until scale returns. Concurrent scale calls are rejected, never queued.
 class ScalingExecutor {
@@ -18,6 +20,8 @@ public:
 
     bool scale(const SourceFrame& source, const ScalingGeometry& geometry,
                ScalingAlgorithm algorithm, std::span<std::uint8_t> destination);
+    bool applyGeometry(const CrtGeometryPlan& plan, std::span<const std::uint8_t> source,
+                       std::span<std::uint8_t> destination);
     std::size_t workerCount() const;
     // Cumulative thread starts for this executor's lifetime, also usable by
     // diagnostics/tests to distinguish persistent workers from per-frame ones.

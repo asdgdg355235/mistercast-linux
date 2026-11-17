@@ -1,4 +1,7 @@
 #include "app/StreamingCoordinator.h"
+#include "app/CrtGeometryProfile.h"
+
+#include <QSettings>
 
 namespace mistercast {
 
@@ -9,6 +12,9 @@ StreamingCoordinator::StreamingCoordinator(QObject* parent)
     , portal_(this)
     , controller_(mailbox_, audioCapture_, this)
 {
+    QSettings settings;
+    videoCapture_.setGeometrySettings(loadCrtGeometryProfile(settings, outputMode_).geometry);
+
     connect(&portal_, &ScreenCastPortal::streamReady, this,
         [this](int descriptor, std::uint32_t nodeId, std::uint64_t pipeWireSerial) {
             QString error;
@@ -230,7 +236,10 @@ bool StreamingCoordinator::resolveOutput(bool sourceChanged)
         stopStreaming();
     }
     outputMode_ = mode;
-    modeEpoch_ = videoCapture_.setOutputMode(mode, !sourceChanged);
+    QSettings settings;
+    modeEpoch_ = videoCapture_.setOutputMode(mode, !sourceChanged,
+        loadCrtGeometryProfile(settings, mode).geometry);
+    emit outputModeChanged(outputMode_);
     if (restart) {
         beginStreaming(std::move(*restart));
     }
@@ -240,6 +249,11 @@ bool StreamingCoordinator::resolveOutput(bool sourceChanged)
 void StreamingCoordinator::setFramingSettings(FramingSettings settings)
 {
     videoCapture_.setFramingSettings(settings);
+}
+
+void StreamingCoordinator::setGeometrySettings(CrtGeometrySettings settings)
+{
+    videoCapture_.setGeometrySettings(settings);
 }
 
 } // namespace mistercast

@@ -1,6 +1,7 @@
 #include "core/ScalingExecutor.h"
 
 #include "core/FrameProcessor.h"
+#include "core/CrtGeometry.h"
 #include "core/LancIRRuntime.h"
 
 #include <algorithm>
@@ -19,10 +20,12 @@ struct ScalingExecutor::Impl {
         std::optional<detail::LancIRRuntime> lancir{std::in_place};
         std::thread thread;
     };
-    enum class Phase { Native, CopyCrop, LancIR, Transform };
+    enum class Phase { Native, CopyCrop, LancIR, Transform, Geometry };
     struct Job {
         Phase phase{};
         const ScalePlan* plan{};
+        const CrtGeometryPlan* geometryPlan{};
+        std::span<const std::uint8_t> geometrySource;
         ScalingGeometry geometry{};
         ScalingInput input{};
         std::span<std::uint8_t> destination;
@@ -126,6 +129,9 @@ struct ScalingExecutor::Impl {
         const auto& g = job.geometry;
         const auto& in = job.input;
         switch (job.phase) {
+        case Phase::Geometry:
+            job.geometryPlan->render(job.geometrySource, job.destination, first, end);
+            return true;
         case Phase::Native:
             return scaleRows(*job.plan, job.destination, first, end);
         case Phase::CopyCrop: {
@@ -163,6 +169,18 @@ struct ScalingExecutor::Impl {
             return true;
         }
         return false;
+    }
+
+    bool applyGeometry(const CrtGeometryPlan& plan, std::span<const std::uint8_t> source,
+                       std::span<std::uint8_t> destination)
+    {
+        if (!accepting.load() || !plan.validBuffers(source, destination)) return false;
+        std::unique_lock operation(operationMutex, std::try_to_lock);
+        if (!operation || !accepting.load()) return false;
+        job.geometryPlan = &plan;
+        job.geometrySource = source;
+        job.destination = destination;
+        return dispatch(Phase::Geometry, plan.height());
     }
 
     bool scale(const SourceFrame& source, const ScalingGeometry& geometry,
@@ -222,6 +240,12 @@ bool ScalingExecutor::scale(const SourceFrame& source, const ScalingGeometry& ge
                             ScalingAlgorithm algorithm, std::span<std::uint8_t> destination)
 {
     return impl_->scale(source, geometry, algorithm, destination);
+}
+bool ScalingExecutor::applyGeometry(const CrtGeometryPlan& plan,
+                                    std::span<const std::uint8_t> source,
+                                    std::span<std::uint8_t> destination)
+{
+    return impl_->applyGeometry(plan, source, destination);
 }
 std::size_t ScalingExecutor::workerCount() const { return impl_->count; }
 std::size_t ScalingExecutor::threadsStarted() const { return impl_->starts.load(); }

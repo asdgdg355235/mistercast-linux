@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/CrtGeometry.h"
 #include "core/FrameMailbox.h"
 #include "core/FrameProcessor.h"
 #include "core/ScalingExecutor.h"
@@ -31,7 +32,9 @@ public:
         QString& error);
     void stop();
     void setFramingSettings(FramingSettings settings);
-    ModeEpoch setOutputMode(const Modeline& modeline, bool reuseCachedFrame);
+    void setGeometrySettings(CrtGeometrySettings settings);
+    ModeEpoch setOutputMode(const Modeline& modeline, bool reuseCachedFrame,
+                            CrtGeometrySettings geometry = {});
 
 signals:
     void started(std::uint32_t width, std::uint32_t height, const QString& format);
@@ -57,23 +60,49 @@ private:
     pw_stream* stream_{};
     spa_hook streamListener_{};
     spa_video_info_raw format_{};
-    FramingSettings framing_{};
-    std::mutex framingMutex_;
-    Modeline outputMode_{kDefaultModeline};
-    mutable std::mutex modeMutex_;
-    ModeEpoch modeEpoch_{1};
+    struct ProcessingSettings {
+        // Only raster dimensions and scan type are needed by the capture path.
+        Modeline raster{.name = {}, .hActive = kDefaultModeline.hActive, .vActive = kDefaultModeline.vActive};
+        ModeEpoch epoch{1};
+        FramingSettings framing{};
+        CrtGeometrySettings geometry{};
+        std::uint64_t revision{}, framingRevision{};
+    };
+    ProcessingSettings settings_;
+    std::mutex settingsMutex_;
+    ProcessingSettings settingsSnapshot();
+    void scheduleRerender(unsigned retries = 2);
+    static int onRerender(spa_loop*, bool, std::uint32_t, const void*, std::size_t, void*);
+    void rerender();
+    void convertSource(const SourceFrame* source, FrameMailbox::Clock::time_point capturedAt);
+    void publishConverted(const ProcessingSettings& settings, FrameOrigin origin,
+                          std::chrono::nanoseconds conversion = {});
+
+    // GUI owns start/stop/scheduling. Capture callbacks and mode changes
+    // serialize baseline ownership under frameMutex_ before taking settingsMutex_.
+    friend class PipeWireGeometryTest;
     std::array<std::uint8_t, kMaximumFrameBytes> converted_{};
     std::array<std::uint8_t, kMaximumFrameBytes> previousConverted_{};
-    // Both conversion paths hold frameMutex_ through executor completion.
+    std::array<std::uint8_t, kMaximumFrameBytes> geometryOutput_;
     ScalingExecutor scalingExecutor_;
     std::mutex frameMutex_;
-    std::uint16_t convertedWidth_{};
-    std::uint16_t convertedHeight_{};
-    std::uint16_t cachedConvertedWidth_{};
-    std::uint16_t cachedConvertedHeight_{};
-    FrameMailbox::Clock::time_point convertedCapturedAt_{};
-    bool hasConvertedFrame_{};
-    bool convertedFrameIsSynthetic_{};
+    struct Baseline {
+        ModeEpoch epoch;
+        std::uint16_t width, height;
+        std::uint64_t sourceGeneration, framingRevision;
+        FrameMailbox::Clock::time_point capturedAt;
+        bool synthetic{};
+    };
+    std::optional<Baseline> baseline_;
+    std::uint16_t cachedConvertedWidth_{}, cachedConvertedHeight_{};
+    std::uint64_t sourceGeneration_{}, processingFailures_{};
+    std::optional<std::uint64_t> lastPublishedRevision_;
+    std::optional<CrtGeometryPlan> geometryPlan_;
+    CrtGeometrySettings plannedGeometry_{};
+    ModeEpoch plannedEpoch_{};
+    std::atomic_bool rerenderPending_{};
+    std::atomic_uint64_t rerenderGeneration_{};
+    bool rerenderRetryPending_{}; // GUI thread
     std::atomic_bool running_{};
     std::atomic_uint64_t generation_{};
     bool loopStarted_{};

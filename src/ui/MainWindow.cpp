@@ -1,5 +1,6 @@
 #include "ui/MainWindow.h"
 #include "ui/CrtModeControls.h"
+#include "ui/CrtGeometryControls.h"
 #include "ui/ScalingSelector.h"
 
 #include "core/ModelineCatalog.h"
@@ -109,6 +110,12 @@ MainWindow::MainWindow(QWidget* parent)
     timingDetails_->setWordWrap(true);
     modeLayout->addWidget(timingDetails_);
     layout->addWidget(modeGroup);
+    auto* geometry = new CrtGeometryControls(central);
+    layout->addWidget(geometry);
+    connect(geometry, &CrtGeometryControls::geometryChanged,
+            &streaming_, &StreamingCoordinator::setGeometrySettings);
+    connect(&streaming_, &StreamingCoordinator::outputModeChanged,
+            geometry, &CrtGeometryControls::setMode);
 
     auto* framingGroup = new QGroupBox(QStringLiteral("Framing"), central);
     auto* framingForm = new QFormLayout(framingGroup);
@@ -235,6 +242,13 @@ MainWindow::MainWindow(QWidget* parent)
                     << "latency frame=" << snapshot.frameNumber
                     << " captured=" << snapshot.capturedFrames
                     << " reused=" << snapshot.reusedFrames
+                    << " geometry_rerenders=" << snapshot.rerenderedFrames
+                    << " geometry_revision=" << snapshot.processingRevision
+                    << " video_processing_failures=" << snapshot.processingFailures
+                    << " geometry_us_avg=" << snapshot.averageGeometryUs
+                    << " geometry_us_max=" << snapshot.maximumGeometryUs
+                    << " geometry_rerender_age_ms=" << snapshot.rerenderAgeMs
+                    << " video_publish_us_avg=" << snapshot.averageVideoPublicationUs
                     << " dequeue_age_ms_p50=" << snapshot.medianDequeueAgeMs
                     << " dequeue_age_ms_p95=" << snapshot.p95DequeueAgeMs
                     << " dequeue_age_ms_max=" << snapshot.maximumDequeueAgeMs

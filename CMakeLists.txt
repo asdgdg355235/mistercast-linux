@@ -53,6 +53,9 @@ add_library(mistercast_core
     src/input/MpvIpc.cpp
     src/input/MpvIpc.h
     src/core/AudioFrameCadence.h
+    src/core/CrtGeometry.cpp
+    src/core/CrtGeometry.h
+    src/core/Gamma24Tables.h
     src/core/CrtModeline.cpp
     src/core/CrtModeline.h
     src/core/FrameFields.cpp
@@ -89,6 +92,10 @@ target_link_libraries(mistercast_core PRIVATE PkgConfig::LZ4 switchres_calculato
 target_compile_options(mistercast_core PRIVATE -Wall -Wextra -Wpedantic)
 
 add_executable(mistercast
+    src/app/CrtGeometryProfile.cpp
+    src/app/CrtGeometryProfile.h
+    src/ui/CrtGeometryControls.cpp
+    src/ui/CrtGeometryControls.h
     src/app/StreamingCoordinator.cpp
     src/app/StreamingCoordinator.h
     src/audio/PipeWireAudioCapture.cpp
@@ -136,6 +143,56 @@ qt_add_resources(mistercast "modelines"
 )
 
 if(BUILD_TESTING)
+    add_executable(pipewire_geometry_test tests/PipeWireGeometryTest.cpp
+        src/capture/PipeWireVideoCapture.cpp src/capture/PipeWireVideoCapture.h)
+    set_target_properties(pipewire_geometry_test PROPERTIES AUTOMOC ON)
+    target_link_libraries(pipewire_geometry_test PRIVATE mistercast_core Qt6::Test PkgConfig::PIPEWIRE)
+    target_compile_options(pipewire_geometry_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME pipewire_geometry COMMAND pipewire_geometry_test)
+    set_tests_properties(pipewire_geometry PROPERTIES LABELS "integration;concurrency" TIMEOUT 15)
+
+    add_executable(crt_geometry_controls_test tests/CrtGeometryControlsTest.cpp
+        src/app/CrtGeometryProfile.cpp src/ui/CrtGeometryControls.cpp src/ui/CrtGeometryControls.h)
+    set_target_properties(crt_geometry_controls_test PROPERTIES AUTOMOC ON)
+    target_link_libraries(crt_geometry_controls_test PRIVATE mistercast_core Qt6::Test Qt6::Widgets)
+    target_compile_options(crt_geometry_controls_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME crt_geometry_controls COMMAND crt_geometry_controls_test)
+    set_tests_properties(crt_geometry_controls PROPERTIES LABELS unit ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+    add_executable(crt_geometry_test tests/CrtGeometryTest.cpp)
+    target_link_libraries(crt_geometry_test PRIVATE mistercast_core)
+    target_link_options(crt_geometry_test PRIVATE
+        -Wl,--wrap=_Znwm -Wl,--wrap=_Znam -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc)
+    target_compile_options(crt_geometry_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME crt_geometry COMMAND crt_geometry_test)
+    set_tests_properties(crt_geometry PROPERTIES LABELS "unit;concurrency")
+
+    find_package(Python3 QUIET COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+        add_executable(gamma24_reference_test tests/Gamma24Reference.cpp)
+        target_link_libraries(gamma24_reference_test PRIVATE mistercast_core)
+        target_compile_options(gamma24_reference_test PRIVATE -Wall -Wextra -Wpedantic)
+        add_test(NAME gamma24_oracle COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/reference/generate_gamma24.py
+            --oracle ${CMAKE_CURRENT_BINARY_DIR}/gamma24-oracle.bin)
+        set_tests_properties(gamma24_oracle PROPERTIES FIXTURES_SETUP gamma24_vectors LABELS unit TIMEOUT 90)
+        add_test(NAME gamma24_exhaustive COMMAND gamma24_reference_test
+            ${CMAKE_CURRENT_BINARY_DIR}/gamma24-oracle.bin)
+        set_tests_properties(gamma24_exhaustive PROPERTIES FIXTURES_REQUIRED gamma24_vectors LABELS unit TIMEOUT 90)
+    endif()
+
+    set(MISTERCAST_CRT_ADJUST_SOURCE "" CACHE PATH "Pinned MiSTer-CRT-Adjust source for RTL tests")
+    if(MISTERCAST_CRT_ADJUST_SOURCE)
+        find_program(IVERILOG_EXECUTABLE iverilog REQUIRED)
+        find_program(VVP_EXECUTABLE vvp REQUIRED)
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        add_test(NAME crt_geometry_rtl COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/rtl/check_reference.py
+            ${MISTERCAST_CRT_ADJUST_SOURCE} ${IVERILOG_EXECUTABLE} ${VVP_EXECUTABLE}
+            $<TARGET_FILE:crt_geometry_test>)
+        set_tests_properties(crt_geometry_rtl PROPERTIES LABELS integration TIMEOUT 300)
+    endif()
+
     add_executable(real_gamepad_test tests/RealGamepadTest.cpp)
     target_link_libraries(real_gamepad_test PRIVATE mistercast_core ${CMAKE_DL_LIBS})
     target_compile_options(real_gamepad_test PRIVATE -Wall -Wextra -Wpedantic)
@@ -209,7 +266,7 @@ install(FILES packaging/mistercast.desktop
     DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
 install(FILES resources/mistercast.svg
     DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
-install(FILES README.md docs/linux-gamepads.md packaging/70-mistercast-input.rules
+install(FILES README.md docs/linux-gamepads.md docs/crt-geometry.md packaging/70-mistercast-input.rules
     DESTINATION ${CMAKE_INSTALL_DOCDIR})
 install(FILES COPYING LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR})
 
