@@ -26,6 +26,7 @@ class PipeWireGeometryTest : public QObject {
 
 private slots:
     void staticSourceAndModeEpoch();
+    void staticSourceViewport();
     void iccStaticInterlaced();
 };
 
@@ -116,7 +117,7 @@ void PipeWireGeometryTest::staticSourceAndModeEpoch()
     QCOMPARE(mailbox->waitForLatest(*frame, cursor, meta, nextSpec, std::chrono::milliseconds(40)),
              FrameReadResult::NoChange);
 
-    // Framing changes require new source pixels. The CRT offset applies after
+    // The CRT offset applies after
     // rotation, so shifting right still puts black on the left.
     FramingSettings framing;
     framing.rotation = Rotation::Flip180;
@@ -137,6 +138,56 @@ void PipeWireGeometryTest::staticSourceAndModeEpoch()
         QVERIFY(startLoop(*capture));
         QVERIFY(!capture->baseline_);
     }
+    capture->stop();
+}
+
+void PipeWireGeometryTest::staticSourceViewport()
+{
+    auto mailbox = std::make_unique<FrameMailbox>();
+    auto capture = std::make_unique<PipeWireVideoCapture>(*mailbox);
+    auto frame = std::make_unique<std::array<std::uint8_t, kMaximumFrameBytes>>();
+    auto mode = kDefaultModeline;
+    mode.hActive = 20;
+    mode.vActive = 16;
+    mode.interlaced = true;
+    const auto epoch = capture->setOutputMode(mode, false);
+    QVERIFY(startLoop(*capture));
+    const FrameSpec spec{mode.fullFrameBytes(), 20, 16, epoch};
+    std::vector<std::uint8_t> original(16 * 12 * 3, 211);
+    const SourceFrame source{original.data() + 16 * 11 * 3, 16, 12, -16 * 3, PixelFormat::Bgr};
+    capture->convertSource(&source, FrameMailbox::Clock::now());
+    const auto* cache = capture->sourceStorage_.get();
+    QVERIFY(cache);
+    FrameCursor cursor;
+    FrameMetadata meta;
+    QCOMPARE(mailbox->tryReadLatest(*frame, cursor, meta, spec), FrameReadResult::Copied);
+    const auto revision = meta.processing.settingsRevision;
+
+    std::ranges::fill(original, 13); // The compositor can overwrite a returned buffer.
+    capture->setContentViewport({true, false, 16, 12, 3, 1});
+    QCOMPARE(mailbox->waitForLatest(*frame, cursor, meta, spec, std::chrono::seconds(1)), FrameReadResult::Copied);
+    QCOMPARE(meta.modeEpoch, epoch);
+    QVERIFY(meta.processing.settingsRevision > revision);
+    QCOMPARE((*frame)[(20 + 3) * 3], 211);
+    QCOMPARE((*frame)[(20 + 2) * 3], 0);
+    for (int i = 0; i < 64; ++i) capture->setContentViewport({true, false, 16, 12, -i, -1});
+    capture->setContentViewport({true, true, 16, 12});
+    const auto finalRevision = capture->settingsSnapshot().revision;
+    while (meta.processing.settingsRevision < finalRevision) {
+        const auto before = meta.processing.settingsRevision;
+        QCOMPARE(mailbox->waitForLatest(*frame, cursor, meta, spec, std::chrono::seconds(1)), FrameReadResult::Copied);
+        QVERIFY(meta.processing.settingsRevision > before);
+    }
+    QCOMPARE((*frame)[(2 * 20 + 2) * 3], 211);
+    QCOMPARE(capture->sourceStorage_.get(), cache);
+    capture->convertSource(&source, FrameMailbox::Clock::now());
+    QCOMPARE(capture->sourceStorage_.get(), cache);
+    capture->stop();
+    QVERIFY(!capture->cachedSource_);
+    QVERIFY(startLoop(*capture));
+    capture->setContentViewport({});
+    QCOMPARE(mailbox->tryReadLatest(*frame, cursor, meta, spec), FrameReadResult::Incompatible);
+    QCOMPARE(mailbox->waitForLatest(*frame, cursor, meta, spec, std::chrono::milliseconds(50)), FrameReadResult::NoChange);
     capture->stop();
 }
 
@@ -223,6 +274,20 @@ void PipeWireGeometryTest::iccStaticInterlaced()
         QCOMPARE(decoded, raw);
         encoder.commit(raw, parity, after);
     }
+
+    const ContentViewport shifted{true, false, 64, 48, -3, 1};
+    capture->setContentViewport(shifted);
+    QCOMPARE(mailbox->waitForLatest(*frame, cursor, meta, spec, std::chrono::seconds(1)), FrameReadResult::Copied);
+    std::vector<std::uint8_t> padded(spec.bytes), adjusted(spec.bytes);
+    for (int row = 0; row < mode.vActive - 1; ++row) {
+        std::copy_n(image.begin() + row * stride + 9, stride - 9, padded.begin() + (row + 1) * stride);
+    }
+    plan->render(padded, adjusted, 0, mode.vActive);
+    QVERIFY(second.transform->apply(adjusted, expected, mode.hActive, mode.vActive, true));
+    QCOMPARE(meta.modeEpoch, epoch);
+    QVERIFY(std::equal(expected.begin(), expected.end(), frame->begin()));
+    capture->setContentViewport({});
+    QCOMPARE(mailbox->waitForLatest(*frame, cursor, meta, spec, std::chrono::seconds(1)), FrameReadResult::Copied);
 
     for (int i = 0; i < 100; ++i) {
         capture->setIccSettings({first.transform, false});

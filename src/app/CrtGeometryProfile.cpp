@@ -21,9 +21,9 @@ QByteArray timingTuple(const Modeline& mode)
     return bytes;
 }
 
-QString profilePath(const QByteArray& tuple)
+QString profilePath(const QByteArray& tuple, QString prefix = QStringLiteral("crtGeometry/v1/profiles/"))
 {
-    return QStringLiteral("crtGeometry/v1/profiles/") +
+    return prefix +
         QString::fromLatin1(QCryptographicHash::hash(tuple, QCryptographicHash::Sha256).toHex()) +
         QLatin1Char('/');
 }
@@ -61,6 +61,29 @@ void saveCrtGeometryProfile(QSettings& settings, const Modeline& mode, CrtGeomet
     settings.setValue(path + QStringLiteral("hPosition"), geometry.hPosition);
     settings.setValue(path + QStringLiteral("vShift"), geometry.vShift);
     settings.setValue(path + QStringLiteral("cabinetVSize"), geometry.cabinetVSize);
+}
+
+ContentViewport loadContentViewport(QSettings& settings, const Modeline& mode)
+{
+    const auto path = profilePath(timingTuple(mode), QStringLiteral("contentViewport/v1/profiles/"));
+    return clampContentViewport({settings.value(path + QStringLiteral("enabled"), false).toBool(),
+        settings.value(path + QStringLiteral("centered"), true).toBool(),
+        settings.value(path + QStringLiteral("width")).toInt(),
+        settings.value(path + QStringLiteral("height")).toInt(),
+        settings.value(path + QStringLiteral("x")).toInt(),
+        settings.value(path + QStringLiteral("y")).toInt()}, mode);
+}
+
+void saveContentViewport(QSettings& settings, const Modeline& mode, ContentViewport viewport)
+{
+    const auto path = profilePath(timingTuple(mode), QStringLiteral("contentViewport/v1/profiles/"));
+    viewport = clampContentViewport(viewport, mode);
+    settings.setValue(path + QStringLiteral("enabled"), viewport.enabled);
+    settings.setValue(path + QStringLiteral("centered"), viewport.centered);
+    settings.setValue(path + QStringLiteral("width"), viewport.width);
+    settings.setValue(path + QStringLiteral("height"), viewport.height);
+    settings.setValue(path + QStringLiteral("x"), viewport.x);
+    settings.setValue(path + QStringLiteral("y"), viewport.y);
 }
 
 } // namespace mistercast

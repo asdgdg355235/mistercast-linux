@@ -196,6 +196,32 @@ void pixels()
     CHECK(!executor.applyGeometry(plan, input, out));
 }
 
+void viewportAllocations()
+{
+    const auto mode = raster(664, 498, true);
+    ScalingExecutor executor(4);
+    std::vector<std::uint8_t> source(640 * 480 * 3), destination(mode.fullFrameBytes());
+    std::vector<std::uint8_t> scratch(kMaximumFrameBytes);
+    const SourceFrame frame{source.data(), 640, 480, 640 * 3, PixelFormat::Bgr};
+    const ContentViewport native{true, true, 640, 480};
+    const ContentViewport scaled{true, true, 620, 465};
+    const auto compose = [&](const ContentViewport& viewport) {
+        return FrameProcessor::composeViewport(executor, frame, destination, scratch, mode, {}, viewport);
+    };
+    CHECK(compose(native));
+    CHECK(compose(scaled));
+    const auto before = geometryAllocations.load();
+    trackGeometryAllocations = true;
+    for (int i = 0; i < 500; ++i) {
+        CHECK(compose(native));
+        CHECK(compose(scaled));
+    }
+    trackGeometryAllocations = false;
+    CHECK(geometryAllocations.load() == before);
+    CHECK(executor.threadsStarted() == 4);
+    std::cout << "repeated_viewport_frames=1000 observed_viewport_allocations=0\n";
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -225,6 +251,7 @@ int main(int argc, char** argv)
             return 0;
         }
         coordinates();
+        viewportAllocations();
         pixels();
         CHECK(blendGamma24(0, 255, 128) == 191);
     } catch (const std::exception& e) {

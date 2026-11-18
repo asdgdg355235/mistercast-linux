@@ -1,5 +1,6 @@
 #include "core/AudioFrameCadence.h"
 #include "core/CrtGeometry.h"
+#include "core/FrameProcessor.h"
 #include "core/ScalingExecutor.h"
 #include "core/CrtModeline.h"
 #include "stream/GroovyMister.h"
@@ -119,20 +120,30 @@ private:
     std::array<std::uint8_t, 2048> packet_{};
 };
 
+enum class Picture { Full, Geometry, Viewport };
+
 void publish(FrameMailbox& mailbox, const Modeline& mode, ModeEpoch epoch,
-             bool shifted = false)
+             Picture picture = Picture::Full)
 {
     std::vector<std::uint8_t> frame(mode.fullFrameBytes());
     const std::size_t rowBytes = mode.hActive * 3;
     for (std::size_t row = 0; row < mode.vActive; ++row) {
         std::fill_n(frame.begin() + row * rowBytes, rowBytes, row % 2 + 1);
     }
-    if (shifted) {
+    if (picture == Picture::Geometry) {
         const auto plan = CrtGeometryPlan::make(mode, {true, 0, 2});
         QVERIFY(plan);
         std::vector<std::uint8_t> output(frame.size());
         ScalingExecutor executor(2);
         QVERIFY(executor.applyGeometry(*plan, frame, output));
+        frame.swap(output);
+    }
+    if (picture == Picture::Viewport) {
+        const SourceFrame source{frame.data(), mode.hActive, mode.vActive, 0, PixelFormat::Bgr};
+        std::vector<std::uint8_t> output(frame.size());
+        ScalingExecutor executor(2);
+        QVERIFY(FrameProcessor::composeViewport(executor, source, output, {}, mode, {},
+                {true, false, mode.hActive, mode.hActive * 3 / 4, 2, 0}));
         frame.swap(output);
     }
     mailbox.publish(frame, mode.hActive, mode.vActive, epoch);
@@ -185,16 +196,30 @@ void CrtStreamTest::restartWithGeneratedGeometry()
     QVERIFY(firstField >= 0);
     auto previous = receiver.receiveField(pal, false);
     QCOMPARE(previous, 1 - firstField);
-    publish(*mailbox, pal, newEpoch, true);
-    unsigned shiftedParities = 0;
-    for (int i = 0; i < 8 && shiftedParities != 3; ++i) {
-        bool shifted = false;
-        const auto field = receiver.receiveField(pal, false, &shifted);
-        QCOMPARE(field, 1 - previous); // No new INIT/SWITCHRES, no parity reset.
-        previous = field;
-        if (shifted) shiftedParities |= 1u << field;
+    for (const auto picture : {Picture::Geometry, Picture::Viewport}) {
+        if (picture == Picture::Viewport) {
+            publish(*mailbox, pal, newEpoch);
+            unsigned restored = 0;
+            for (int i = 0; i < 8 && restored != 3; ++i) {
+                bool shifted = false;
+                const auto field = receiver.receiveField(pal, false, &shifted);
+                QCOMPARE(field, 1 - previous);
+                previous = field;
+                if (!shifted) restored |= 1u << field;
+            }
+            QCOMPARE(restored, 3u);
+        }
+        publish(*mailbox, pal, newEpoch, picture);
+        unsigned shiftedParities = 0;
+        for (int i = 0; i < 8 && shiftedParities != 3; ++i) {
+            bool shifted = false;
+            const auto field = receiver.receiveField(pal, false, &shifted);
+            QCOMPARE(field, 1 - previous); // No new INIT/SWITCHRES, no parity reset.
+            previous = field;
+            if (shifted) shiftedParities |= 1u << field;
+        }
+        QCOMPARE(shiftedParities, 3u);
     }
-    QCOMPARE(shiftedParities, 3u);
     controller.stop();
     QVERIFY(receiver.receiveClose());
 

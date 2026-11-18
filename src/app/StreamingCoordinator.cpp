@@ -14,6 +14,7 @@ StreamingCoordinator::StreamingCoordinator(QObject* parent)
 {
     QSettings settings;
     videoCapture_.setGeometrySettings(loadCrtGeometryProfile(settings, outputMode_).geometry);
+    videoCapture_.setContentViewport(loadContentViewport(settings, outputMode_));
 
     connect(&portal_, &ScreenCastPortal::streamReady, this,
         [this](int descriptor, std::uint32_t nodeId, std::uint64_t pipeWireSerial) {
@@ -238,7 +239,7 @@ bool StreamingCoordinator::resolveOutput(bool sourceChanged)
     outputMode_ = mode;
     QSettings settings;
     modeEpoch_ = videoCapture_.setOutputMode(mode, !sourceChanged,
-        loadCrtGeometryProfile(settings, mode).geometry);
+        loadCrtGeometryProfile(settings, mode).geometry, loadContentViewport(settings, mode));
     emit outputModeChanged(outputMode_);
     if (restart) {
         beginStreaming(std::move(*restart));

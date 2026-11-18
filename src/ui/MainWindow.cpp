@@ -5,6 +5,7 @@
 #include "ui/IccProfileControls.h"
 
 #include "core/ModelineCatalog.h"
+#include "app/CrtGeometryProfile.h"
 
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -22,6 +23,8 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSettings>
+#include <QScreen>
+#include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QStandardPaths>
@@ -29,6 +32,7 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <algorithm>
 #include <filesystem>
 
 namespace mistercast {
@@ -42,8 +46,16 @@ MainWindow::MainWindow(QWidget* parent)
 
     auto* central = new QWidget(this);
     auto* layout = new QVBoxLayout(central);
-    layout->setContentsMargins(18, 18, 18, 18);
-    layout->setSpacing(12);
+    layout->setContentsMargins(8, 8, 8, 8);
+    auto* settingsScroll = new QScrollArea(central);
+    settingsScroll->setObjectName(QStringLiteral("settingsScroll"));
+    settingsScroll->setWidgetResizable(true);
+    settingsScroll->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+    auto* settingsPanel = new QWidget;
+    auto* settingsLayout = new QVBoxLayout(settingsPanel);
+    settingsLayout->setContentsMargins(6, 6, 6, 6);
+    settingsScroll->setWidget(settingsPanel);
+    layout->addWidget(settingsScroll, 5);
 
     auto* connectionGroup = new QGroupBox(QStringLiteral("Connection"), central);
     auto* form = new QFormLayout(connectionGroup);
@@ -93,8 +105,9 @@ MainWindow::MainWindow(QWidget* parent)
     });
     diagnosticsCheck_ = new QCheckBox(QStringLiteral("Show diagnostics"), connectionGroup);
     diagnosticsCheck_->setChecked(settings.value(QStringLiteral("diagnostics"), false).toBool());
+    diagnosticsCheck_->setObjectName(QStringLiteral("showDiagnostics"));
     form->addRow(QString(), diagnosticsCheck_);
-    layout->addWidget(connectionGroup);
+    settingsLayout->addWidget(connectionGroup);
 
     auto* modeGroup = new QGroupBox(QStringLiteral("CRT Output"), central);
     auto* modeLayout = new QVBoxLayout(modeGroup);
@@ -112,10 +125,12 @@ MainWindow::MainWindow(QWidget* parent)
     timingDetails_->setTextFormat(Qt::PlainText);
     timingDetails_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     timingDetails_->setWordWrap(true);
+    timingDetails_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    timingDetails_->setObjectName(QStringLiteral("timingDetails"));
     modeLayout->addWidget(timingDetails_);
-    layout->addWidget(modeGroup);
+    settingsLayout->addWidget(modeGroup);
     auto* geometry = new CrtGeometryControls(central);
-    layout->addWidget(geometry);
+    settingsLayout->addWidget(geometry);
     connect(geometry, &CrtGeometryControls::geometryChanged,
             &streaming_, &StreamingCoordinator::setGeometrySettings);
     connect(&streaming_, &StreamingCoordinator::outputModeChanged,
@@ -141,41 +156,134 @@ MainWindow::MainWindow(QWidget* parent)
     verticalOffset_ = new QSpinBox(framingGroup);
     verticalOffset_->setRange(-4096, 4096);
     verticalOffset_->setValue(settings.value(QStringLiteral("verticalOffset"), 0).toInt());
-    framingForm->addRow(QStringLiteral("Horizontal"), horizontalAlignment_);
-    framingForm->addRow(QStringLiteral("Vertical"), verticalAlignment_);
+    framingForm->addRow(QStringLiteral("Horizontal source alignment"), horizontalAlignment_);
+    framingForm->addRow(QStringLiteral("Vertical source alignment"), verticalAlignment_);
     framingForm->addRow(QStringLiteral("Rotation"), rotation_);
     framingForm->addRow(QStringLiteral("Scaling"), scaling_);
-    framingForm->addRow(QStringLiteral("Horizontal offset"), horizontalOffset_);
-    framingForm->addRow(QStringLiteral("Vertical offset"), verticalOffset_);
-    layout->addWidget(framingGroup);
+    framingForm->addRow(QStringLiteral("Horizontal source offset"), horizontalOffset_);
+    framingForm->addRow(QStringLiteral("Vertical source offset"), verticalOffset_);
+    auto* viewportTitle = new QLabel(tr("Content viewport"), framingGroup);
+    framingForm->addRow(viewportTitle);
+    customContent_ = new QCheckBox(tr("Custom content dimensions"), framingGroup);
+    centerContent_ = new QCheckBox(tr("Center content"), framingGroup);
+    customContent_->setObjectName(QStringLiteral("customContent"));
+    framingForm->addRow(customContent_);
+    const auto contentControl = [&](const QString& label, const QString& name, const QString& tip) {
+        auto* control = new QSpinBox(framingGroup);
+        control->setObjectName(name);
+        control->setToolTip(tip);
+        control->setKeyboardTracking(false);
+        framingForm->addRow(label, control);
+        return control;
+    };
+    contentWidth_ = contentControl(tr("Content width"), QStringLiteral("contentWidth"),
+                                   tr("Picture width in output pixels."));
+    contentHeight_ = contentControl(tr("Content height"), QStringLiteral("contentHeight"),
+                                    tr("Picture height in full-frame output lines."));
+    framingForm->addRow(centerContent_);
+    contentX_ = contentControl(tr("Content X"), QStringLiteral("contentX"),
+                                tr("Horizontal origin in pixels from the left edge. Negative values clip."));
+    contentY_ = contentControl(tr("Content Y"), QStringLiteral("contentY"),
+                                tr("Vertical origin in full-frame lines from the top edge. Negative values clip."));
+    rasterSummary_ = new QLabel(framingGroup);
+    viewportSummary_ = new QLabel(framingGroup);
+    viewportSummary_->setWordWrap(true);
+    framingForm->addRow(tr("Output raster"), rasterSummary_);
+    framingForm->addRow(tr("Visible content"), viewportSummary_);
+    auto* resetViewport = new QPushButton(tr("Reset viewport"), framingGroup);
+    framingForm->addRow(QString(), resetViewport);
+
+    connect(customContent_, &QCheckBox::toggled, this, [this](bool value) {
+        viewport_.enabled = value;
+        saveViewport();
+    });
+    connect(centerContent_, &QCheckBox::toggled, this, [this](bool value) {
+        viewport_.centered = value;
+        saveViewport();
+    });
+    const auto connectCoordinate = [&](QSpinBox* spin, int ContentViewport::*field) {
+        connect(spin, &QSpinBox::valueChanged, this, [this, field](int value) {
+            viewport_.*field = value;
+            saveViewport();
+        });
+    };
+    connectCoordinate(contentWidth_, &ContentViewport::width);
+    connectCoordinate(contentHeight_, &ContentViewport::height);
+    connectCoordinate(contentX_, &ContentViewport::x);
+    connectCoordinate(contentY_, &ContentViewport::y);
+    connect(resetViewport, &QPushButton::clicked, this, [this] {
+        viewport_ = {};
+        saveViewport();
+    });
+    connect(&streaming_, &StreamingCoordinator::outputModeChanged, this, &MainWindow::restoreViewport);
+    restoreViewport(streaming_.outputMode());
+    settingsLayout->addWidget(framingGroup);
+    settingsLayout->addStretch();
+    for (auto* combo : settingsPanel->findChildren<QComboBox*>()) {
+        combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        combo->setMinimumContentsLength(8);
+    }
 
     auto* actions = new QHBoxLayout;
     sourceButton_ = new QPushButton(QStringLiteral("Select Desktop Source"), central);
     startButton_ = new QPushButton(QStringLiteral("Start Streaming"), central);
     stopButton_ = new QPushButton(QStringLiteral("Stop"), central);
+    sourceButton_->setObjectName(QStringLiteral("selectSource"));
+    startButton_->setObjectName(QStringLiteral("startStreaming"));
+    stopButton_->setObjectName(QStringLiteral("stopStreaming"));
     actions->addWidget(sourceButton_);
     actions->addWidget(startButton_);
     actions->addWidget(stopButton_);
     layout->addLayout(actions);
 
-    sourceStatus_ = new QLabel(QStringLiteral("Source: not selected"), central);
-    streamStatus_ = new QLabel(QStringLiteral("Stream: idle"), central);
-    latencyStatus_ = new QLabel(QStringLiteral("Latency metrics: waiting"), central);
-    audioStatus_ = new QLabel(QStringLiteral("Audio diagnostics: waiting"), central);
-    audioStatus_->setWordWrap(true);
-    fpgaStatus_ = new QLabel(QStringLiteral("FPGA delivery: waiting"), central);
-    fpgaStatus_->setWordWrap(true);
-    layout->addWidget(sourceStatus_);
-    layout->addWidget(streamStatus_);
-    layout->addWidget(latencyStatus_);
-    layout->addWidget(audioStatus_);
-    layout->addWidget(fpgaStatus_);
+    auto* statusScroll = new QScrollArea(central);
+    statusScroll->setObjectName(QStringLiteral("statusScroll"));
+    statusScroll->setWidgetResizable(true);
+    statusScroll->setMinimumHeight(54);
+    statusScroll->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+    auto* statusPanel = new QWidget;
+    auto* statusLayout = new QVBoxLayout(statusPanel);
+    statusLayout->setContentsMargins(5, 2, 5, 2);
+    const auto statusLabel = [&](const QString& message, const QString& name) {
+        auto* label = new QLabel(message, statusPanel);
+        label->setObjectName(name);
+        label->setTextFormat(Qt::PlainText);
+        label->setWordWrap(true);
+        label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        statusLayout->addWidget(label);
+        return label;
+    };
+    sourceStatus_ = statusLabel(tr("Source: not selected"), QStringLiteral("sourceStatus"));
+    streamStatus_ = statusLabel(tr("Stream: idle"), QStringLiteral("streamStatus"));
+    latencyStatus_ = statusLabel(tr("Latency metrics: waiting"), QStringLiteral("latencyStatus"));
+    audioStatus_ = statusLabel(tr("Audio diagnostics: waiting"), QStringLiteral("audioStatus"));
+    fpgaStatus_ = statusLabel(tr("FPGA delivery: waiting"), QStringLiteral("fpgaStatus"));
+    statusLayout->addStretch();
+    statusScroll->setWidget(statusPanel);
+    layout->addWidget(statusScroll, 2);
 
     log_ = new QPlainTextEdit(central);
+    log_->setObjectName(QStringLiteral("statusLog"));
     log_->setReadOnly(true);
     log_->setMaximumBlockCount(200);
+    log_->setMinimumHeight(48);
+    log_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
     layout->addWidget(log_, 1);
     setCentralWidget(central);
+    if (restoreGeometry(settings.value(QStringLiteral("mainWindowGeometry")).toByteArray())) {
+        // restoreGeometry relocates off-screen windows. Bound the normal
+        // geometry as well when moving between screens of different sizes.
+        if (screen() && !isMaximized() && !isFullScreen()) {
+            create(); // Obtain the platform frame margins before bounding the restored rectangle.
+            const auto available = screen()->availableGeometry();
+            const auto decoration = frameSize() - size();
+            resize(size().boundedTo(available.size() - decoration));
+            const auto maxX = std::max(available.left(), available.right() - frameSize().width() + 1);
+            const auto maxY = std::max(available.top(), available.bottom() - frameSize().height() + 1);
+            move(std::clamp(x(), available.left(), maxX), std::clamp(y(), available.top(), maxY));
+        }
+    }
 
     connect(sourceButton_, &QPushButton::clicked, this, &MainWindow::selectSource);
     connect(startButton_, &QPushButton::clicked, this, &MainWindow::startStreaming);
@@ -359,6 +467,7 @@ MainWindow::~MainWindow()
 void MainWindow::closeEvent(QCloseEvent* event)
 {
     QSettings settings;
+    settings.setValue(QStringLiteral("mainWindowGeometry"), saveGeometry());
     settings.setValue(QStringLiteral("misterHost"), hostEdit_->text().trimmed());
     settings.setValue(QStringLiteral("audio"), audioCheck_->isChecked());
     settings.setValue(QStringLiteral("systemGamepads"), gamepadCheck_->isChecked());
@@ -512,6 +621,51 @@ const Modeline& MainWindow::selectedModeline() const
     }
     
     return modelines_[static_cast<std::size_t>(index)];
+}
+
+void MainWindow::restoreViewport(const Modeline& mode)
+{
+    QSettings settings;
+    viewport_ = loadContentViewport(settings, mode);
+    refreshViewport();
+}
+
+void MainWindow::saveViewport()
+{
+    const auto& mode = streaming_.outputMode();
+    viewport_ = clampContentViewport(viewport_, mode);
+    QSettings settings;
+    saveContentViewport(settings, mode, viewport_);
+    streaming_.setContentViewport(viewport_);
+    refreshViewport();
+}
+
+void MainWindow::refreshViewport()
+{
+    const auto& mode = streaming_.outputMode();
+    const auto content = contentRect(viewport_, mode);
+    const auto visible = visibleContentRect(content, mode);
+    const QSignalBlocker customBlock(customContent_), centerBlock(centerContent_),
+        widthBlock(contentWidth_), heightBlock(contentHeight_), xBlock(contentX_), yBlock(contentY_);
+    customContent_->setChecked(viewport_.enabled);
+    centerContent_->setChecked(viewport_.centered);
+    contentWidth_->setRange(1, kMaximumActiveWidth);
+    contentHeight_->setRange(1, kMaximumActiveHeight);
+    contentX_->setRange(-int(kMaximumActiveWidth), mode.hActive);
+    contentY_->setRange(-int(kMaximumActiveHeight), mode.vActive);
+    contentWidth_->setValue(content.width);
+    contentHeight_->setValue(content.height);
+    contentX_->setValue(content.x);
+    contentY_->setValue(content.y);
+    contentWidth_->setEnabled(viewport_.enabled);
+    contentHeight_->setEnabled(viewport_.enabled);
+    centerContent_->setEnabled(viewport_.enabled);
+    contentX_->setEnabled(viewport_.enabled && !viewport_.centered);
+    contentY_->setEnabled(viewport_.enabled && !viewport_.centered);
+    rasterSummary_->setText(tr("%1 × %2%3").arg(mode.hActive).arg(mode.vActive)
+        .arg(mode.interlaced ? QStringLiteral("i") : QStringLiteral("p")));
+    viewportSummary_->setText(tr("%1 × %2 at (%3, %4)").arg(visible.width).arg(visible.height)
+        .arg(content.x).arg(content.y));
 }
 
 void MainWindow::updateFramingSettings()

@@ -94,7 +94,7 @@ target_include_directories(mistercast_core SYSTEM PRIVATE third_party/avir)
 target_link_libraries(mistercast_core PRIVATE PkgConfig::LZ4 PkgConfig::LCMS2 switchres_calculator PUBLIC Threads::Threads)
 target_compile_options(mistercast_core PRIVATE -Wall -Wextra -Wpedantic)
 
-add_executable(mistercast
+add_library(mistercast_gui STATIC
     src/app/CrtGeometryProfile.cpp
     src/app/CrtGeometryProfile.h
     src/ui/CrtGeometryControls.cpp
@@ -127,12 +127,11 @@ add_executable(mistercast
     src/ui/CrtModeControls.h
     src/ui/ScalingSelector.cpp
     src/ui/ScalingSelector.h
-    src/main.cpp
 )
 
-set_target_properties(mistercast PROPERTIES AUTOMOC ON)
+set_target_properties(mistercast_gui PROPERTIES AUTOMOC ON)
 
-target_link_libraries(mistercast PRIVATE
+target_link_libraries(mistercast_gui PUBLIC
     mistercast_core
     Qt6::Core
     Qt6::Widgets
@@ -140,6 +139,9 @@ target_link_libraries(mistercast PRIVATE
     PkgConfig::PIPEWIRE
 )
 
+target_compile_options(mistercast_gui PRIVATE -Wall -Wextra -Wpedantic)
+add_executable(mistercast src/main.cpp)
+target_link_libraries(mistercast PRIVATE mistercast_gui)
 target_compile_options(mistercast PRIVATE -Wall -Wextra -Wpedantic)
 
 qt_add_resources(mistercast "modelines"
@@ -148,6 +150,17 @@ qt_add_resources(mistercast "modelines"
 )
 
 if(BUILD_TESTING)
+    add_executable(main_window_test tests/MainWindowTest.cpp)
+    set_target_properties(main_window_test PROPERTIES AUTOMOC ON)
+    target_link_libraries(main_window_test PRIVATE mistercast_gui Qt6::Test)
+    qt_add_resources(main_window_test "modelines" PREFIX "/mistercast" FILES resources/modelines.dat)
+    add_test(NAME main_window COMMAND main_window_test)
+    set_tests_properties(main_window PROPERTIES LABELS integration TIMEOUT 15
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_test(NAME main_window_scaled COMMAND main_window_test)
+    set_tests_properties(main_window_scaled PROPERTIES LABELS integration TIMEOUT 15
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_SCALE_FACTOR=1.25")
+
     add_executable(icc_transform_test tests/IccTransformTest.cpp)
     set_target_properties(icc_transform_test PROPERTIES AUTOMOC ON)
     target_link_libraries(icc_transform_test PRIVATE mistercast_core Qt6::Test PkgConfig::LCMS2)
@@ -294,7 +307,7 @@ install(FILES packaging/mistercast.desktop
     DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
 install(FILES resources/mistercast.svg
     DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
-install(FILES README.md docs/linux-gamepads.md docs/crt-geometry.md docs/icc-color.md
+install(FILES README.md docs/linux-gamepads.md docs/crt-geometry.md docs/icc-color.md docs/content-viewport.md
     packaging/70-mistercast-input.rules
     DESTINATION ${CMAKE_INSTALL_DOCDIR})
 install(FILES COPYING LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR})
@@ -303,8 +316,11 @@ install(FILES third_party/avir/LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR}/avir)
 install(FILES third_party/switchres/COPYING third_party/switchres/README.md
     DESTINATION ${CMAKE_INSTALL_DOCDIR}/switchres)
 
-option(MISTERCAST_BUILD_BENCHMARKS "Build the optional scaler benchmark" OFF)
+option(MISTERCAST_BUILD_BENCHMARKS "Build the optional video processing benchmarks" OFF)
 if(MISTERCAST_BUILD_BENCHMARKS)
+    add_executable(viewport_benchmark tests/ViewportBenchmark.cpp)
+    target_link_libraries(viewport_benchmark PRIVATE mistercast_core)
+    target_compile_options(viewport_benchmark PRIVATE -Wall -Wextra -Wpedantic)
     add_executable(icc_benchmark tests/IccBenchmark.cpp)
     target_link_libraries(icc_benchmark PRIVATE mistercast_core PkgConfig::LCMS2)
     target_compile_options(icc_benchmark PRIVATE -Wall -Wextra -Wpedantic)

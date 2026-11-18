@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/Scaler.h"
+#include "core/Modeline.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -53,6 +54,21 @@ struct FramingSettings {
     ScalingAlgorithm scaling{ScalingAlgorithm::Nearest};
 };
 
+struct ContentViewport {
+    bool enabled{};
+    bool centered{true};
+    int width{}, height{}, x{}, y{};
+    bool operator==(const ContentViewport&) const = default;
+};
+
+struct ContentRect {
+    int x, y, width, height;
+};
+
+ContentViewport clampContentViewport(ContentViewport viewport, const Modeline& raster);
+ContentRect contentRect(const ContentViewport& viewport, const Modeline& raster);
+ContentRect visibleContentRect(const ContentRect& content, const Modeline& raster);
+
 class ScalingExecutor;
 
 class FrameProcessor {
@@ -64,6 +80,10 @@ public:
         std::uint16_t outputWidth,
         std::uint16_t outputHeight,
         const FramingSettings& framing = {});
+    static bool composeViewport(ScalingExecutor& executor, const SourceFrame& source,
+        std::span<std::uint8_t> destination, std::span<std::uint8_t> scratch,
+        const Modeline& raster, const FramingSettings& framing, const ContentViewport& viewport);
+
     static bool resizeBgr(
         ScalingExecutor& executor,
         std::span<const std::uint8_t> source,

@@ -32,11 +32,12 @@ public:
         std::uint64_t pipeWireSerial,
         QString& error);
     void stop();
+    void setContentViewport(ContentViewport viewport);
     void setFramingSettings(FramingSettings settings);
     void setIccSettings(IccProcessingSettings settings);
     void setGeometrySettings(CrtGeometrySettings settings);
     ModeEpoch setOutputMode(const Modeline& modeline, bool reuseCachedFrame,
-                            CrtGeometrySettings geometry = {});
+                            CrtGeometrySettings geometry = {}, ContentViewport viewport = {});
 
 signals:
     void started(std::uint32_t width, std::uint32_t height, const QString& format);
@@ -67,6 +68,7 @@ private:
         Modeline raster{.name = {}, .hActive = kDefaultModeline.hActive, .vActive = kDefaultModeline.vActive};
         ModeEpoch epoch{1};
         FramingSettings framing{};
+        ContentViewport viewport{};
         CrtGeometrySettings geometry{};
         IccProcessingSettings icc{};
         std::uint64_t revision{}, framingRevision{};
@@ -78,6 +80,9 @@ private:
     static int onRerender(spa_loop*, bool, std::uint32_t, const void*, std::size_t, void*);
     void rerender();
     void convertSource(const SourceFrame* source, FrameMailbox::Clock::time_point capturedAt);
+    bool renderBaseline(const SourceFrame* source, const ProcessingSettings& settings,
+                        FrameMailbox::Clock::time_point capturedAt);
+    void cacheSource(const SourceFrame& source);
     void publishConverted(const ProcessingSettings& settings, FrameOrigin origin,
                           std::chrono::nanoseconds conversion = {});
 
@@ -85,20 +90,21 @@ private:
     // serialize baseline ownership under frameMutex_ before taking settingsMutex_.
     friend class PipeWireGeometryTest;
     std::array<std::uint8_t, kMaximumFrameBytes> converted_{};
-    std::array<std::uint8_t, kMaximumFrameBytes> previousConverted_{};
+    std::array<std::uint8_t, kMaximumFrameBytes> viewportScratch_;
+    std::unique_ptr<std::uint8_t[]> sourceStorage_;
+    std::size_t sourceCapacity_{};
+    std::optional<SourceFrame> cachedSource_;
+    bool cachedBlank_{};
     std::array<std::uint8_t, kMaximumFrameBytes> geometryOutput_;
     std::unique_ptr<std::uint8_t[]> iccOutput_;
     ScalingExecutor scalingExecutor_;
     std::mutex frameMutex_;
     struct Baseline {
         ModeEpoch epoch;
-        std::uint16_t width, height;
         std::uint64_t sourceGeneration, framingRevision;
         FrameMailbox::Clock::time_point capturedAt;
-        bool synthetic{};
     };
     std::optional<Baseline> baseline_;
-    std::uint16_t cachedConvertedWidth_{}, cachedConvertedHeight_{};
     std::uint64_t sourceGeneration_{}, processingFailures_{};
     std::optional<std::uint64_t> lastPublishedRevision_;
     std::optional<CrtGeometryPlan> geometryPlan_;

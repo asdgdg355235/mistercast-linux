@@ -32,6 +32,8 @@ public:
     void shutdown();
     void configureOutput(const Modeline& manual, std::optional<CrtRequest> automatic,
                          const std::vector<Modeline>& catalog);
+    void setContentViewport(ContentViewport viewport) { videoCapture_.setContentViewport(viewport); }
+    const Modeline& outputMode() const { return outputMode_; }
     void setFramingSettings(FramingSettings settings);
     void setIccSettings(IccProcessingSettings settings);
     void setGeometrySettings(CrtGeometrySettings settings);

@@ -29,6 +29,7 @@ class CoreTest final : public QObject {
 
 private slots:
     void bgrIdentity();
+    void contentViewport();
     void rgbConversion();
     void wideSourceCropsToFourByThree();
     void quarterTurnRotations();
@@ -51,6 +52,94 @@ private slots:
     void stereoRingOverflow();
     void stereoRingWaitsForProducer();
 };
+
+void CoreTest::contentViewport()
+{
+    auto mode = kDefaultModeline;
+    const ContentViewport centered{true, true, 640, 480};
+    for (const auto [width, height, x, y] : {std::array{664, 498, 12, 9},
+             std::array{656, 492, 8, 6}, std::array{640, 480, 0, 0}}) {
+        mode.hActive = width;
+        mode.vActive = height;
+        const auto rectangle = contentRect(centered, mode);
+        QCOMPARE(rectangle.x, x);
+        QCOMPARE(rectangle.y, y);
+    }
+    mode.hActive = 664;
+    mode.vActive = 498;
+    mode.interlaced = true;
+    const auto timings = GroovyProtocolCodec::makeModeSwitchCommand(mode);
+    constexpr int sourceStride = 640 * 3;
+    std::vector<std::uint8_t> pixels(sourceStride * 480);
+    for (int row = 0; row < 480; ++row) {
+        std::fill_n(pixels.data() + row * sourceStride, sourceStride, row % 2 ? 235 : 16);
+    }
+    const SourceFrame source{pixels.data(), 640, 480, sourceStride, PixelFormat::Bgr};
+    std::vector<std::uint8_t> raster(mode.fullFrameBytes(), 255), original(raster.size());
+    QVERIFY(FrameProcessor::convertToBgr(executor_, source, original, 664, 498));
+    QVERIFY(FrameProcessor::composeViewport(executor_, source, raster, {}, mode, {}, {}));
+    QCOMPARE(raster, original);
+    const auto check = [&](ContentViewport viewport) {
+        // No scratch storage. A native crop must place pixels directly.
+        QVERIFY(FrameProcessor::composeViewport(executor_, source, raster, {}, mode, {}, viewport));
+        const auto bounds = contentRect(viewport, mode);
+        for (int row = 0; row < mode.vActive; ++row) {
+            for (int col = 0; col < mode.hActive; ++col) {
+                const int srcX = col - bounds.x, srcY = row - bounds.y;
+                const auto expected = srcX >= 0 && srcX < 640 && srcY >= 0 && srcY < 480
+                    ? pixels[srcY * sourceStride + srcX * 3] : 0;
+                const auto i = (row * mode.hActive + col) * 3;
+                if (raster[i] != expected || raster[i + 1] != expected || raster[i + 2] != expected) {
+                    QFAIL("Viewport crop, padding, or native content pixel mismatch");
+                }
+            }
+        }
+        // An odd origin exchanges the source row parity sampled by the two
+        // fixed output fields. The receiver's field order never changes.
+        std::vector<std::uint8_t> field(mode.payloadBytes());
+        for (auto parity : {FieldParity::Field0OddSourceLines, FieldParity::Field1EvenSourceLines}) {
+            QVERIFY(extractInterlacedField(raster, mode, parity, field));
+            const int first = parity == FieldParity::Field0OddSourceLines ? 1 : 0;
+            for (int row = 0; row < mode.payloadHeight(); ++row) {
+                QCOMPARE(field[row * mode.hActive * 3 + 30 * 3],
+                         raster[(row * 2 + first) * mode.hActive * 3 + 30 * 3]);
+            }
+        }
+    };
+    check(centered);
+    for (int y : {-1, 0, 1, 8, 9, 10}) check({true, false, 640, 480, -5, y});
+    check({true, false, 640, 480, 40, 35});
+    QCOMPARE(GroovyProtocolCodec::makeModeSwitchCommand(mode), timings);
+
+    mode.hActive = 320;
+    mode.vActive = 240;
+    mode.interlaced = false;
+    const auto larger = contentRect({true, true, 641, 481}, mode);
+    QCOMPARE(larger.x, -161);
+    QCOMPARE(larger.y, -121);
+    std::vector<std::uint8_t> scratch(kMaximumFrameBytes);
+    for (const auto algorithm : {ScalingAlgorithm::Nearest, ScalingAlgorithm::Bilinear,
+                                 ScalingAlgorithm::Area, ScalingAlgorithm::LancIR}) {
+        FramingSettings framing;
+        framing.scaling = algorithm;
+        QVERIFY(FrameProcessor::composeViewport(executor_, source, raster, scratch,
+                mode, framing, {true, true, 641, 481}));
+        std::vector<std::uint8_t> scaled(641 * 481 * 3);
+        QVERIFY(FrameProcessor::convertToBgr(executor_, source, scaled, 641, 481, framing));
+        for (int row = 0; row < mode.vActive; ++row) {
+            const auto first = scaled.begin() + ((row - larger.y) * 641 - larger.x) * 3;
+            QVERIFY(std::equal(first, first + 320 * 3, raster.begin() + row * 320 * 3));
+        }
+    }
+    QVERIFY(!FrameProcessor::composeViewport(executor_, source, raster, scratch,
+            mode, {}, {true, true, 0, 480}));
+    QVERIFY(!FrameProcessor::composeViewport(executor_, source, raster, scratch,
+            mode, {}, {true, true, 65535, 480}));
+    QVERIFY(!FrameProcessor::composeViewport(executor_, source, std::span(raster).first(1),
+            scratch, mode, {}, centered));
+    QVERIFY(!FrameProcessor::composeViewport(executor_, source, raster, {}, mode, {},
+            {true, true, 641, 481}));
+}
 
 void CoreTest::bgrIdentity()
 {

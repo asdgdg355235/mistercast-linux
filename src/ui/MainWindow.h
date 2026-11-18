@@ -36,12 +36,25 @@ private:
     void appendStatus(const QString& message, bool error = false);
     void updateControls();
     void updateFramingSettings();
+    void restoreViewport(const Modeline& mode);
+    void refreshViewport();
+    void saveViewport();
     void updateDiagnosticsVisibility();
     void reloadModelines();
     void applySelectedModeline();
     [[nodiscard]] const Modeline& selectedModeline() const;
 
     StreamingCoordinator streaming_;
+
+    ContentViewport viewport_;
+    QCheckBox* customContent_{};
+    QCheckBox* centerContent_{};
+    QSpinBox* contentWidth_{};
+    QSpinBox* contentHeight_{};
+    QSpinBox* contentX_{};
+    QSpinBox* contentY_{};
+    QLabel* rasterSummary_{};
+    QLabel* viewportSummary_{};
 
     QLineEdit* hostEdit_{};
     QCheckBox* audioCheck_{};

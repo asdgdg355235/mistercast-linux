@@ -82,7 +82,15 @@ Automatic mode accepts 2.5–25 MHz, keeps the output within 720×576, and check
 
 If generation fails, MiSTerCast tries the selected fallback, the closest compatible catalog entry, then the built-in 320×240p preset. A fallback must pass the same CRT, clock, and refresh checks, match the chosen active height and scan policy, and match any explicit width. The status log identifies rejected candidates and the selected fallback. If no candidate passes, MiSTerCast stops the current stream or blocks startup. When output timing changes, MiSTerCast joins the old sender before changing the capture epoch and opening a fresh Groovy_MiSTer session. The new session starts with fresh pacing, field, and compression state.
 
-The source is center-cropped to 4:3 by default. The **Framing** group provides alignment, offsets, rotation, & a **Scaling** selector. **Nearest** remains the default & preserves hard pixel edges. **Bilinear** interpolates between neighboring pixel centers. **Area** averages pixel coverage when shrinking & uses bilinear interpolation on enlarging axes. **LANCIR (Lanczos-3)** uses Aleksey Vaneev's [AVIR project](https://github.com/avaneev/avir) implementation with its default Lanczos-3 filter. Framing changes apply to subsequent captured frames without restarting capture or streaming. The selected scaler is saved between launches & also applies to the temporary frame shown during output-mode changes. The streaming path retains only the newest frame; it never queues stale video to improve apparent smoothness.
+The source is center-cropped to 4:3 by default. The **Framing** group provides alignment, offsets, rotation, & a **Scaling** selector. **Nearest** remains the default & preserves hard pixel edges. **Bilinear** interpolates between neighboring pixel centers. **Area** averages pixel coverage when shrinking & uses bilinear interpolation on enlarging axes. **LANCIR (Lanczos-3)** uses Aleksey Vaneev's [AVIR project](https://github.com/avaneev/avir) implementation with its default Lanczos-3 filter. Framing changes also rerender the last captured source frame when the desktop is static. The selected scaler is saved between launches & also applies to the temporary frame shown during output-mode changes. The streaming path retains only the newest frame; it never queues stale video to improve apparent smoothness.
+
+Enable **Custom content dimensions** in **Framing** to place a picture at
+its own size within the active raster. Use **Center content** or enter signed
+**Content X/Y** coordinates from the raster's top-left corner. **CRT Output**
+still controls the transmitted modeline. Viewports are saved per timing.
+**Reset viewport** restores full-raster framing. The settings, diagnostics,
+and log scroll independently, and the window restores its size on reopening.
+See [content viewport controls and benchmarks](docs/content-viewport.md).
 
 The **CRT Geometry** panel adjusts H-Size, H-Position, V-Shift & gamma-2.4
 Cabinet V-Size within the active raster. Changes apply while streaming and are
