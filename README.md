@@ -9,7 +9,7 @@ The GUI supports automatic CRT timing generation and editable NTSC and PAL prese
 Arch Linux dependencies:
 
 ```sh
-sudo pacman -S --needed cmake ninja qt6-base pipewire wireplumber lz4 pkgconf \
+sudo pacman -S --needed cmake ninja qt6-base pipewire wireplumber lz4 lcms2 pkgconf \
   xdg-desktop-portal xdg-desktop-portal-kde
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
@@ -47,6 +47,28 @@ Use `./build/mistercast --tone 192.168.1.50` to include a 440 Hz test tone. Netw
 ## GUI
 
 Run `./build/mistercast`, choose **Select Desktop Source**, and approve a monitor or window in the compositor portal. Enter the MiSTer address and start streaming. With diagnostics enabled, the GUI reports the median, p95, and maximum age since PipeWire dequeue for newly captured frames, plus the number of output frames that reused an unchanged capture. Capture processing, preflight-ready wait, compression, UDP-capacity wait, and socket-submission time are also reported. Frame age and the component timings are complementary measurements and should not be added together.
+
+### ICC color correction
+
+In **Connection**, select an absolute `.icc` or `.icm` path below **mpv IPC
+socket**, then turn on **Enable ICC color correction**. MiSTerCast saves the
+path, enable setting, and separate calibration setting. Both switches default
+to off. Profile changes apply while streaming, including on a static desktop.
+An invalid profile leaves the stream running with correction off and shows the
+error under the controls.
+
+LittleCMS 2 converts assumed SDR sRGB capture pixels to the selected CRT
+display profile with relative colorimetric intent. It supports DisplayCAL /
+Argyll XYZ LUT and matrix/TRC profiles. **Apply embedded calibration (vcgt)**
+is available when the profile contains usable, separate calibration curves.
+Enable it when the CRT's profiling setup expects those curves and the MiSTer
+output has no equivalent calibration active.
+
+ICC runs after scaling, rotation, and CRT geometry, and before interlaced
+field extraction. Cabinet V-Size still interpolates with fixed gamma 2.4.
+An enabled transform adds one reusable 1.19 MiB BGR buffer and runs on the
+existing scaling workers. LUT cost varies with resolution, profile, and CPU.
+See [ICC processing, benchmarks, and verification](docs/icc-color.md).
 
 ### CRT output
 

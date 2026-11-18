@@ -33,6 +33,7 @@ public:
     void configureOutput(const Modeline& manual, std::optional<CrtRequest> automatic,
                          const std::vector<Modeline>& catalog);
     void setFramingSettings(FramingSettings settings);
+    void setIccSettings(IccProcessingSettings settings);
     void setGeometrySettings(CrtGeometrySettings settings);
 
     [[nodiscard]] bool sourceReady() const { return sourceReady_; }

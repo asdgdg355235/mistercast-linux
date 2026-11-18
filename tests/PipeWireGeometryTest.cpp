@@ -1,4 +1,9 @@
 #include "capture/PipeWireVideoCapture.h"
+#include "core/FrameFields.h"
+#include "stream/GroovyVideoEncoder.h"
+#include "IccFixtures.h"
+
+#include <lz4.h>
 
 #include <QtTest>
 
@@ -21,6 +26,7 @@ class PipeWireGeometryTest : public QObject {
 
 private slots:
     void staticSourceAndModeEpoch();
+    void iccStaticInterlaced();
 };
 
 void PipeWireGeometryTest::staticSourceAndModeEpoch()
@@ -131,6 +137,115 @@ void PipeWireGeometryTest::staticSourceAndModeEpoch()
         QVERIFY(startLoop(*capture));
         QVERIFY(!capture->baseline_);
     }
+    capture->stop();
+}
+
+void PipeWireGeometryTest::iccStaticInterlaced()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const std::filesystem::path base(dir.path().toStdString());
+    const auto matrix = base / "matrix.icc";
+    const auto lut = base / "lut.icm";
+    QVERIFY(icc_test::writeDisplay(matrix, false, false));
+    QVERIFY(icc_test::writeDisplay(lut, true, true));
+    const auto first = IccTransform::load(matrix);
+    auto second = IccTransform::load(lut);
+    QVERIFY(first.transform && second.transform);
+
+    auto mailbox = std::make_unique<FrameMailbox>();
+    auto capture = std::make_unique<PipeWireVideoCapture>(*mailbox);
+    auto frame = std::make_unique<std::array<std::uint8_t, kMaximumFrameBytes>>();
+    const Modeline mode{.name = {}, .hActive = 64, .vActive = 48, .interlaced = true};
+    const CrtGeometrySettings geometry{true, 5, 3, 1, -2};
+    const auto epoch = capture->setOutputMode(mode, false, geometry);
+    const FrameSpec spec{mode.fullFrameBytes(), mode.hActive, mode.vActive, epoch};
+    QVERIFY(startLoop(*capture));
+
+    std::vector<std::uint8_t> image(spec.bytes), geometryOnly(spec.bytes), expected(spec.bytes);
+    const auto stride = mode.hActive * 3;
+    for (std::size_t i = 0; i < image.size(); ++i) {
+        image[i] = (i / stride) % 2 ? (i * 31) % 256 : (i * 47 + 5) % 256;
+    }
+    const SourceFrame source{image.data(), mode.hActive, mode.vActive, stride, PixelFormat::Bgr};
+    const auto at = FrameMailbox::Clock::now();
+    capture->convertSource(&source, at);
+    FrameCursor cursor;
+    FrameMetadata meta;
+    QCOMPARE(mailbox->tryReadLatest(*frame, cursor, meta, spec), FrameReadResult::Copied);
+    QVERIFY(!capture->iccOutput_);
+    const auto plan = CrtGeometryPlan::make(mode, geometry);
+    QVERIFY(plan);
+    plan->render(image, geometryOnly, 0, mode.vActive);
+    QVERIFY(std::equal(geometryOnly.begin(), geometryOnly.end(), frame->begin()));
+
+    const auto rerender = [&](IccProcessingSettings settings) {
+        capture->setIccSettings(std::move(settings));
+        return mailbox->waitForLatest(*frame, cursor, meta, spec, std::chrono::seconds(1));
+    };
+    QCOMPARE(rerender({first.transform, false}), FrameReadResult::Copied);
+    QVERIFY(meta.processing.icc.count() > 0);
+    QCOMPARE(meta.processing.conversion.count(), 0);
+    QCOMPARE(meta.capturedAt, at);
+    QVERIFY(first.transform->apply(geometryOnly, expected, mode.hActive, mode.vActive, false));
+    QVERIFY(std::equal(expected.begin(), expected.end(), frame->begin()));
+    QVERIFY(expected != geometryOnly);
+    const auto* iccBuffer = capture->iccOutput_.get();
+    const auto beforeReplacement = meta.processing.settingsRevision;
+    QCOMPARE(rerender({second.transform, true}), FrameReadResult::Copied);
+    QVERIFY(meta.processing.settingsRevision > beforeReplacement);
+    QCOMPARE(meta.modeEpoch, epoch);
+    QVERIFY(second.transform->apply(geometryOnly, expected, mode.hActive, mode.vActive, true));
+    QVERIFY(std::equal(expected.begin(), expected.end(), frame->begin()));
+
+    // Exercise the sender's unchanged field extractor and encoder for both
+    // parities across a correction update. Compression is allowed to choose
+    // either a full payload or a delta based on content.
+    GroovyVideoEncoder encoder;
+    std::vector<std::uint8_t> raw(mode.payloadBytes()), previous(mode.payloadBytes()), decoded(mode.payloadBytes());
+    for (auto parity : {FieldParity::Field0OddSourceLines, FieldParity::Field1EvenSourceLines}) {
+        QVERIFY(extractInterlacedField(geometryOnly, mode, parity, previous));
+        const auto before = encoder.prepare(previous, mode, parity);
+        encoder.commit(previous, parity, before);
+        QVERIFY(extractInterlacedField(std::span(*frame).first(spec.bytes), mode, parity, raw));
+        const std::size_t firstRow = parity == FieldParity::Field0OddSourceLines ? 1 : 0;
+        for (std::size_t y = 0; y < mode.payloadHeight(); ++y) {
+            QVERIFY(std::equal(raw.begin() + y * stride, raw.begin() + (y + 1) * stride,
+                               expected.begin() + (2 * y + firstRow) * stride));
+        }
+        const auto after = encoder.prepare(raw, mode, parity);
+        QCOMPARE(LZ4_decompress_safe(reinterpret_cast<const char*>(after.payload.data()),
+                                     reinterpret_cast<char*>(decoded.data()),
+                                     after.payload.size(), decoded.size()), int(decoded.size()));
+        if (after.delta) {
+            for (std::size_t i = 0; i < decoded.size(); ++i) decoded[i] += previous[i];
+        }
+        QCOMPARE(decoded, raw);
+        encoder.commit(raw, parity, after);
+    }
+
+    for (int i = 0; i < 100; ++i) {
+        capture->setIccSettings({first.transform, false});
+        capture->setIccSettings({second.transform, true});
+        capture->setIccSettings({});
+    }
+    const auto latest = capture->settingsSnapshot().revision;
+    QElapsedTimer timer;
+    timer.start();
+    while (meta.processing.settingsRevision != latest && timer.elapsed() < 1000) {
+        mailbox->waitForLatest(*frame, cursor, meta, spec, std::chrono::milliseconds(50));
+    }
+    QCOMPARE(meta.processing.settingsRevision, latest);
+    QCOMPARE(meta.processing.icc.count(), 0);
+    QVERIFY(std::equal(geometryOnly.begin(), geometryOnly.end(), frame->begin()));
+    QCOMPARE(capture->iccOutput_.get(), iccBuffer);
+    capture->setIccSettings({std::move(second.transform), true});
+    capture->stop();
+    QVERIFY(startLoop(*capture));
+    QCOMPARE(mailbox->tryReadLatest(*frame, cursor, meta, spec), FrameReadResult::Incompatible);
+    capture->setIccSettings({});
+    QCOMPARE(mailbox->waitForLatest(*frame, cursor, meta, spec, std::chrono::milliseconds(40)),
+             FrameReadResult::NoChange);
     capture->stop();
 }
 

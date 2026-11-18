@@ -3,6 +3,7 @@
 #include "core/CrtGeometry.h"
 #include "core/FrameMailbox.h"
 #include "core/FrameProcessor.h"
+#include "core/IccTransform.h"
 #include "core/ScalingExecutor.h"
 #include "core/Modeline.h"
 
@@ -32,6 +33,7 @@ public:
         QString& error);
     void stop();
     void setFramingSettings(FramingSettings settings);
+    void setIccSettings(IccProcessingSettings settings);
     void setGeometrySettings(CrtGeometrySettings settings);
     ModeEpoch setOutputMode(const Modeline& modeline, bool reuseCachedFrame,
                             CrtGeometrySettings geometry = {});
@@ -66,6 +68,7 @@ private:
         ModeEpoch epoch{1};
         FramingSettings framing{};
         CrtGeometrySettings geometry{};
+        IccProcessingSettings icc{};
         std::uint64_t revision{}, framingRevision{};
     };
     ProcessingSettings settings_;
@@ -84,6 +87,7 @@ private:
     std::array<std::uint8_t, kMaximumFrameBytes> converted_{};
     std::array<std::uint8_t, kMaximumFrameBytes> previousConverted_{};
     std::array<std::uint8_t, kMaximumFrameBytes> geometryOutput_;
+    std::unique_ptr<std::uint8_t[]> iccOutput_;
     ScalingExecutor scalingExecutor_;
     std::mutex frameMutex_;
     struct Baseline {

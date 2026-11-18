@@ -105,7 +105,8 @@ void StreamSession::run(std::stop_token stopToken)
 
     std::array<double, 120> dequeueAgesMs{};
     std::chrono::nanoseconds totalConversion{}, totalGeometry{}, maxGeometry{}, totalPublication{};
-    std::uint32_t rerenderedFrames{}, geometrySamples{};
+    std::chrono::nanoseconds totalIcc{}, maxIcc{};
+    std::uint32_t rerenderedFrames{}, geometrySamples{}, iccSamples{};
     double rerenderAgeMs{};
     std::chrono::nanoseconds totalReadyWait{};
     std::chrono::nanoseconds totalCompression{};
@@ -238,6 +239,11 @@ void StreamSession::run(std::stop_token stopToken)
             maxGeometry = std::max(maxGeometry, frameMetadata.processing.geometry);
             ++geometrySamples;
         }
+        if (capturedNewFrame && frameMetadata.processing.icc.count() > 0) {
+            totalIcc += frameMetadata.processing.icc;
+            maxIcc = std::max(maxIcc, frameMetadata.processing.icc);
+            ++iccSamples;
+        }
         if (capturedNewFrame && frameMetadata.processing.origin == FrameOrigin::GeometryRerender) {
             ++rerenderedFrames;
             rerenderAgeMs = std::chrono::duration<double, std::milli>(
@@ -248,7 +254,7 @@ void StreamSession::run(std::stop_token stopToken)
                     sendStarted - frameMetadata.capturedAt).count();
             totalConversion += frameMetadata.processing.origin == FrameOrigin::ModePreview
                 ? frameMetadata.processing.conversion + frameMetadata.processing.geometry +
-                    frameMetadata.processing.publication
+                    frameMetadata.processing.icc + frameMetadata.processing.publication
                 : frameMetadata.publishedAt - frameMetadata.capturedAt;
             totalReadyWait += preflightStarted > frameMetadata.publishedAt
                 ? preflightStarted - frameMetadata.publishedAt
@@ -300,6 +306,9 @@ void StreamSession::run(std::stop_token stopToken)
                     std::chrono::duration<double, std::micro>(totalGeometry).count() / geometrySamples,
                 .maximumGeometryUs = std::chrono::duration<double, std::micro>(maxGeometry).count(),
                 .rerenderAgeMs = rerenderAgeMs,
+                .averageIccUs = iccSamples == 0 ? 0.0 :
+                    std::chrono::duration<double, std::micro>(totalIcc).count() / iccSamples,
+                .maximumIccUs = std::chrono::duration<double, std::micro>(maxIcc).count(),
                 .averageVideoPublicationUs = capturedFrames + rerenderedFrames == 0 ? 0.0 :
                     std::chrono::duration<double, std::micro>(totalPublication).count() /
                         (capturedFrames + rerenderedFrames),
@@ -371,6 +380,9 @@ void StreamSession::run(std::stop_token stopToken)
             maxGeometry = {};
             rerenderedFrames = 0;
             geometrySamples = 0;
+            totalIcc = {};
+            maxIcc = {};
+            iccSamples = 0;
             rerenderAgeMs = 0;
             totalReadyWait = {};
             totalCompression = {};

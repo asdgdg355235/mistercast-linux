@@ -22,6 +22,7 @@ struct FrameProcessing {
     std::chrono::nanoseconds geometry{};
     std::uint64_t failures{};
     std::chrono::nanoseconds publication{};
+    std::chrono::nanoseconds icc{};
 };
 
 struct FrameMetadata {

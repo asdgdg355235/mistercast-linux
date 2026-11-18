@@ -2,6 +2,7 @@
 #include "ui/CrtModeControls.h"
 #include "ui/CrtGeometryControls.h"
 #include "ui/ScalingSelector.h"
+#include "ui/IccProfileControls.h"
 
 #include "core/ModelineCatalog.h"
 
@@ -87,6 +88,9 @@ MainWindow::MainWindow(QWidget* parent)
     mpvIpcEdit_->setPlaceholderText(QStringLiteral("Absolute path passed to mpv --input-ipc-server"));
     mpvIpcEdit_->setText(settings.value(QStringLiteral("mpvIpcPath")).toString());
     form->addRow(QStringLiteral("mpv IPC socket"), mpvIpcEdit_);
+    new IccProfileControls(*form, [this](IccProcessingSettings icc) {
+        streaming_.setIccSettings(std::move(icc));
+    });
     diagnosticsCheck_ = new QCheckBox(QStringLiteral("Show diagnostics"), connectionGroup);
     diagnosticsCheck_->setChecked(settings.value(QStringLiteral("diagnostics"), false).toBool());
     form->addRow(QString(), diagnosticsCheck_);
@@ -248,6 +252,8 @@ MainWindow::MainWindow(QWidget* parent)
                     << " geometry_us_avg=" << snapshot.averageGeometryUs
                     << " geometry_us_max=" << snapshot.maximumGeometryUs
                     << " geometry_rerender_age_ms=" << snapshot.rerenderAgeMs
+                    << " icc_us_avg=" << snapshot.averageIccUs
+                    << " icc_us_max=" << snapshot.maximumIccUs
                     << " video_publish_us_avg=" << snapshot.averageVideoPublicationUs
                     << " dequeue_age_ms_p50=" << snapshot.medianDequeueAgeMs
                     << " dequeue_age_ms_p95=" << snapshot.p95DequeueAgeMs

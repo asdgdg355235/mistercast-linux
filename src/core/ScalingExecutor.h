@@ -7,6 +7,7 @@
 namespace mistercast {
 
 class CrtGeometryPlan;
+class IccTransform;
 
 // Synchronous, one-frame executor. Source and destination remain caller-owned
 // until scale returns. Concurrent scale calls are rejected, never queued.
@@ -22,6 +23,9 @@ public:
                ScalingAlgorithm algorithm, std::span<std::uint8_t> destination);
     bool applyGeometry(const CrtGeometryPlan& plan, std::span<const std::uint8_t> source,
                        std::span<std::uint8_t> destination);
+    bool applyIcc(const IccTransform& transform, std::span<const std::uint8_t> source,
+                  std::span<std::uint8_t> destination, std::uint16_t width, std::uint16_t height,
+                  bool applyCalibration);
     std::size_t workerCount() const;
     // Cumulative thread starts for this executor's lifetime, also usable by
     // diagnostics/tests to distinguish persistent workers from per-frame ones.

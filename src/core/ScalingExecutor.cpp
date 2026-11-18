@@ -2,6 +2,7 @@
 
 #include "core/FrameProcessor.h"
 #include "core/CrtGeometry.h"
+#include "core/IccTransform.h"
 #include "core/LancIRRuntime.h"
 
 #include <algorithm>
@@ -20,12 +21,15 @@ struct ScalingExecutor::Impl {
         std::optional<detail::LancIRRuntime> lancir{std::in_place};
         std::thread thread;
     };
-    enum class Phase { Native, CopyCrop, LancIR, Transform, Geometry };
+    enum class Phase { Native, CopyCrop, LancIR, Transform, Geometry, Icc };
     struct Job {
         Phase phase{};
         const ScalePlan* plan{};
         const CrtGeometryPlan* geometryPlan{};
-        std::span<const std::uint8_t> geometrySource;
+        const IccTransform* iccTransform{};
+        std::span<const std::uint8_t> bgrSource;
+        std::uint16_t iccWidth{};
+        bool applyCalibration{};
         ScalingGeometry geometry{};
         ScalingInput input{};
         std::span<std::uint8_t> destination;
@@ -130,8 +134,17 @@ struct ScalingExecutor::Impl {
         const auto& in = job.input;
         switch (job.phase) {
         case Phase::Geometry:
-            job.geometryPlan->render(job.geometrySource, job.destination, first, end);
+            job.geometryPlan->render(job.bgrSource, job.destination, first, end);
             return true;
+        case Phase::Icc: {
+            // Each worker runs the same compiled LittleCMS transform on
+            // disjoint packed rows. The transform has no mutable pixel cache.
+            const auto rowBytes = std::size_t{job.iccWidth} * 3;
+            const auto offset = first * rowBytes;
+            const auto bytes = (end - first) * rowBytes;
+            return job.iccTransform->apply(job.bgrSource.subspan(offset, bytes),
+                job.destination.subspan(offset, bytes), job.iccWidth, end - first, job.applyCalibration);
+        }
         case Phase::Native:
             return scaleRows(*job.plan, job.destination, first, end);
         case Phase::CopyCrop: {
@@ -178,9 +191,24 @@ struct ScalingExecutor::Impl {
         std::unique_lock operation(operationMutex, std::try_to_lock);
         if (!operation || !accepting.load()) return false;
         job.geometryPlan = &plan;
-        job.geometrySource = source;
+        job.bgrSource = source;
         job.destination = destination;
         return dispatch(Phase::Geometry, plan.height());
+    }
+
+    bool applyIcc(const IccTransform& transform, std::span<const std::uint8_t> source,
+                  std::span<std::uint8_t> destination, std::uint16_t width, std::uint16_t height,
+                  bool applyCalibration)
+    {
+        if (!accepting.load() || !IccTransform::validBuffers(source, destination, width, height)) return false;
+        std::unique_lock operation(operationMutex, std::try_to_lock);
+        if (!operation || !accepting.load()) return false;
+        job.iccTransform = &transform;
+        job.bgrSource = source;
+        job.destination = destination;
+        job.iccWidth = width;
+        job.applyCalibration = applyCalibration;
+        return dispatch(Phase::Icc, height);
     }
 
     bool scale(const SourceFrame& source, const ScalingGeometry& geometry,
@@ -246,6 +274,12 @@ bool ScalingExecutor::applyGeometry(const CrtGeometryPlan& plan,
                                     std::span<std::uint8_t> destination)
 {
     return impl_->applyGeometry(plan, source, destination);
+}
+bool ScalingExecutor::applyIcc(const IccTransform& transform, std::span<const std::uint8_t> source,
+                               std::span<std::uint8_t> destination, std::uint16_t width,
+                               std::uint16_t height, bool applyCalibration)
+{
+    return impl_->applyIcc(transform, source, destination, width, height, applyCalibration);
 }
 std::size_t ScalingExecutor::workerCount() const { return impl_->count; }
 std::size_t ScalingExecutor::threadsStarted() const { return impl_->starts.load(); }

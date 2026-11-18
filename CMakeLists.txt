@@ -34,6 +34,7 @@ find_package(Threads REQUIRED)
 
 pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3 libspa-0.2)
 pkg_check_modules(LZ4 REQUIRED IMPORTED_TARGET liblz4)
+pkg_check_modules(LCMS2 REQUIRED IMPORTED_TARGET lcms2)
 
 add_library(switchres_calculator STATIC
     third_party/switchres/modeline.cpp
@@ -63,6 +64,8 @@ add_library(mistercast_core
     src/core/Modeline.h
     src/core/ModelineCatalog.cpp
     src/core/ModelineCatalog.h
+    src/core/IccTransform.cpp
+    src/core/IccTransform.h
     src/core/FrameMailbox.cpp
     src/core/FrameMailbox.h
     src/core/FrameProcessor.cpp
@@ -88,7 +91,7 @@ add_library(mistercast_core
 
 target_include_directories(mistercast_core PUBLIC src)
 target_include_directories(mistercast_core SYSTEM PRIVATE third_party/avir)
-target_link_libraries(mistercast_core PRIVATE PkgConfig::LZ4 switchres_calculator PUBLIC Threads::Threads)
+target_link_libraries(mistercast_core PRIVATE PkgConfig::LZ4 PkgConfig::LCMS2 switchres_calculator PUBLIC Threads::Threads)
 target_compile_options(mistercast_core PRIVATE -Wall -Wextra -Wpedantic)
 
 add_executable(mistercast
@@ -116,6 +119,8 @@ add_executable(mistercast
     src/stream/StreamDiagnostics.h
     src/stream/StreamSession.cpp
     src/stream/StreamSession.h
+    src/ui/IccProfileControls.cpp
+    src/ui/IccProfileControls.h
     src/ui/MainWindow.cpp
     src/ui/MainWindow.h
     src/ui/CrtModeControls.cpp
@@ -143,10 +148,33 @@ qt_add_resources(mistercast "modelines"
 )
 
 if(BUILD_TESTING)
+    add_executable(icc_transform_test tests/IccTransformTest.cpp)
+    set_target_properties(icc_transform_test PROPERTIES AUTOMOC ON)
+    target_link_libraries(icc_transform_test PRIVATE mistercast_core Qt6::Test PkgConfig::LCMS2)
+    target_compile_options(icc_transform_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME icc_transform COMMAND icc_transform_test profileErrors matrixAndLut bakedCalibration)
+    set_tests_properties(icc_transform PROPERTIES LABELS unit TIMEOUT 15)
+
+    add_executable(icc_profile_controls_test tests/IccProfileControlsTest.cpp src/ui/IccProfileControls.cpp)
+    set_target_properties(icc_profile_controls_test PROPERTIES AUTOMOC ON)
+    target_link_libraries(icc_profile_controls_test PRIVATE mistercast_core Qt6::Widgets Qt6::Test PkgConfig::LCMS2)
+    target_compile_options(icc_profile_controls_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME icc_profile_controls COMMAND icc_profile_controls_test)
+    set_tests_properties(icc_profile_controls PROPERTIES LABELS "integration;concurrency" TIMEOUT 15
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+    set(MISTERCAST_ICC_TEST_PROFILE "" CACHE FILEPATH "Optional external ICC display profile test fixture")
+    if(MISTERCAST_ICC_TEST_PROFILE)
+        add_test(NAME icc_external_profile COMMAND icc_transform_test suppliedProfile)
+        set_tests_properties(icc_external_profile PROPERTIES LABELS integration TIMEOUT 15
+            ENVIRONMENT "MISTERCAST_ICC_TEST_PROFILE=${MISTERCAST_ICC_TEST_PROFILE}")
+    endif()
+
     add_executable(pipewire_geometry_test tests/PipeWireGeometryTest.cpp
         src/capture/PipeWireVideoCapture.cpp src/capture/PipeWireVideoCapture.h)
     set_target_properties(pipewire_geometry_test PROPERTIES AUTOMOC ON)
-    target_link_libraries(pipewire_geometry_test PRIVATE mistercast_core Qt6::Test PkgConfig::PIPEWIRE)
+    target_link_libraries(pipewire_geometry_test PRIVATE mistercast_core Qt6::Test
+        PkgConfig::PIPEWIRE PkgConfig::LCMS2 PkgConfig::LZ4)
     target_compile_options(pipewire_geometry_test PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME pipewire_geometry COMMAND pipewire_geometry_test)
     set_tests_properties(pipewire_geometry PROPERTIES LABELS "integration;concurrency" TIMEOUT 15)
@@ -266,7 +294,8 @@ install(FILES packaging/mistercast.desktop
     DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
 install(FILES resources/mistercast.svg
     DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
-install(FILES README.md docs/linux-gamepads.md docs/crt-geometry.md packaging/70-mistercast-input.rules
+install(FILES README.md docs/linux-gamepads.md docs/crt-geometry.md docs/icc-color.md
+    packaging/70-mistercast-input.rules
     DESTINATION ${CMAKE_INSTALL_DOCDIR})
 install(FILES COPYING LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR})
 
@@ -276,6 +305,9 @@ install(FILES third_party/switchres/COPYING third_party/switchres/README.md
 
 option(MISTERCAST_BUILD_BENCHMARKS "Build the optional scaler benchmark" OFF)
 if(MISTERCAST_BUILD_BENCHMARKS)
+    add_executable(icc_benchmark tests/IccBenchmark.cpp)
+    target_link_libraries(icc_benchmark PRIVATE mistercast_core PkgConfig::LCMS2)
+    target_compile_options(icc_benchmark PRIVATE -Wall -Wextra -Wpedantic)
     add_executable(scaler_benchmark tests/ScalerBenchmark.cpp)
     target_link_libraries(scaler_benchmark PRIVATE mistercast_core)
     target_compile_options(scaler_benchmark PRIVATE -Wall -Wextra -Wpedantic)

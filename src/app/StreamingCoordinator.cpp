@@ -251,6 +251,11 @@ void StreamingCoordinator::setFramingSettings(FramingSettings settings)
     videoCapture_.setFramingSettings(settings);
 }
 
+void StreamingCoordinator::setIccSettings(IccProcessingSettings settings)
+{
+    videoCapture_.setIccSettings(std::move(settings));
+}
+
 void StreamingCoordinator::setGeometrySettings(CrtGeometrySettings settings)
 {
     videoCapture_.setGeometrySettings(settings);

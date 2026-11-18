@@ -239,6 +239,18 @@ void PipeWireVideoCapture::setGeometrySettings(CrtGeometrySettings geometry)
     scheduleRerender();
 }
 
+void PipeWireVideoCapture::setIccSettings(IccProcessingSettings settings)
+{
+    Q_ASSERT(thread() == QThread::currentThread());
+    {
+        std::lock_guard lock(settingsMutex_);
+        if (settings_.icc == settings) return;
+        settings_.icc = std::move(settings);
+        ++settings_.revision;
+    }
+    scheduleRerender();
+}
+
 void PipeWireVideoCapture::scheduleRerender(unsigned retries)
 {
     Q_ASSERT(thread() == QThread::currentThread());
@@ -255,7 +267,7 @@ void PipeWireVideoCapture::scheduleRerender(unsigned retries)
 
     rerenderPending_ = false;
     if (!retries) {
-        qWarning() << "Unable to queue CRT geometry update:" << spa_strerror(result);
+        qWarning() << "Unable to queue frame processing update:" << spa_strerror(result);
         return;
     }
     rerenderRetryPending_ = true;
@@ -351,8 +363,22 @@ void PipeWireVideoCapture::publishConverted(const ProcessingSettings& settings, 
         output = std::span(geometryOutput_).first(raster.fullFrameBytes());
         geometryTime = FrameMailbox::Clock::now() - startedAt;
     }
+    std::chrono::nanoseconds iccTime{};
+    if (settings.icc.transform) {
+        const auto startedAt = FrameMailbox::Clock::now();
+        if (!iccOutput_) iccOutput_.reset(new (std::nothrow) std::uint8_t[kMaximumFrameBytes]);
+        if (!iccOutput_ || !scalingExecutor_.applyIcc(*settings.icc.transform, output,
+                std::span(iccOutput_.get(), raster.fullFrameBytes()), raster.hActive, raster.vActive,
+                settings.icc.applyCalibration)) {
+            if (++processingFailures_ == 1) qWarning() << "ICC frame conversion failed";
+            return;
+        }
+        output = std::span(iccOutput_.get(), raster.fullFrameBytes());
+        iccTime = FrameMailbox::Clock::now() - startedAt;
+    }
     mailbox_.publish(output, raster.hActive, raster.vActive, settings.epoch, baseline_->capturedAt,
-                     {origin, settings.revision, conversion, geometryTime, processingFailures_});
+                     {.origin = origin, .settingsRevision = settings.revision, .conversion = conversion,
+                      .geometry = geometryTime, .failures = processingFailures_, .icc = iccTime});
     lastPublishedRevision_ = settings.revision;
 }
 

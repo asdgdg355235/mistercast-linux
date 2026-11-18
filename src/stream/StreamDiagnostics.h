@@ -13,6 +13,7 @@ struct VideoDiagnostics {
     std::uint32_t rerenderedFrames{};
     std::uint64_t processingRevision{}, processingFailures{};
     double averageGeometryUs{}, maximumGeometryUs{}, rerenderAgeMs{};
+    double averageIccUs{}, maximumIccUs{};
     double averageVideoPublicationUs{};
     double medianDequeueAgeMs{};
     double p95DequeueAgeMs{};
