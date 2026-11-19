@@ -255,7 +255,7 @@ void PipeWireVideoCapture::setGeometrySettings(CrtGeometrySettings geometry)
     Q_ASSERT(thread() == QThread::currentThread());
     {
         std::lock_guard lock(settingsMutex_);
-        geometry = clampCrtGeometry(geometry, settings_.raster);
+        geometry = clampCrtGeometry(geometry, settings_.raster).forRendering();
         if (settings_.geometry == geometry) return;
         settings_.geometry = geometry;
         ++settings_.revision;
@@ -341,7 +341,7 @@ ModeEpoch PipeWireVideoCapture::setOutputMode(const Modeline& modeline, bool reu
         settings_.raster.hActive = modeline.hActive;
         settings_.raster.vActive = modeline.vActive;
         settings_.raster.interlaced = modeline.interlaced;
-        settings_.geometry = clampCrtGeometry(geometry, modeline);
+        settings_.geometry = clampCrtGeometry(geometry, modeline).forRendering();
         settings_.viewport = clampContentViewport(viewport, modeline);
         ++settings_.epoch.value;
         ++settings_.revision;

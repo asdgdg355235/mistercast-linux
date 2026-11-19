@@ -56,7 +56,7 @@ void PipeWireGeometryTest::staticSourceAndModeEpoch()
         capture->setGeometrySettings(settings);
         return mailbox->waitForLatest(*frame, cursor, meta, spec, std::chrono::seconds(1));
     };
-    const CrtGeometrySettings geometry{true, 1, 2, 1, -1};
+    const CrtGeometrySettings geometry{true, 1, 2, 1, -1, true};
     QCOMPARE(rerendered(geometry), FrameReadResult::Copied);
     QCOMPARE(meta.processing.origin, FrameOrigin::GeometryRerender);
     QVERIFY(meta.capturedAt == at);
@@ -71,6 +71,27 @@ void PipeWireGeometryTest::staticSourceAndModeEpoch()
     QCOMPARE(meta.processing.geometry.count(), 0);
     QCOMPARE(rerendered(geometry), FrameReadResult::Copied);
     QVERIFY(std::equal(edited.begin(), edited.end(), frame->begin()));
+
+    auto cabinetOff = geometry;
+    cabinetOff.cabinetEnabled = false;
+    QCOMPARE(rerendered(cabinetOff), FrameReadResult::Copied);
+    const std::vector<std::uint8_t> ordinary(frame->begin(), frame->begin() + spec.bytes);
+    QVERIFY(ordinary != edited && ordinary != original);
+    const auto beforeDormantEdit = meta.processing.settingsRevision;
+    auto dormantEdit = cabinetOff;
+    dormantEdit.cabinetVSize = 3;
+    capture->setGeometrySettings(dormantEdit);
+    QCOMPARE(capture->settingsSnapshot().revision, beforeDormantEdit);
+    for (int i = 0; i < 12; ++i) {
+        QCOMPARE(rerendered(geometry), FrameReadResult::Copied);
+        QVERIFY(std::equal(edited.begin(), edited.end(), frame->begin()));
+        QCOMPARE(rerendered(cabinetOff), FrameReadResult::Copied);
+        QVERIFY(std::equal(ordinary.begin(), ordinary.end(), frame->begin()));
+        QCOMPARE(meta.modeEpoch, epoch);
+        QCOMPARE(meta.capturedAt, at);
+        QCOMPARE(meta.processing.conversion.count(), 0);
+        QCOMPARE(meta.processing.failures, 0u);
+    }
 
     for (int i = 0; i < 400; ++i) {
         capture->setGeometrySettings({true, i % 15, i % 48, 0, 0});
@@ -208,7 +229,7 @@ void PipeWireGeometryTest::iccStaticInterlaced()
     auto capture = std::make_unique<PipeWireVideoCapture>(*mailbox);
     auto frame = std::make_unique<std::array<std::uint8_t, kMaximumFrameBytes>>();
     const Modeline mode{.name = {}, .hActive = 64, .vActive = 48, .interlaced = true};
-    const CrtGeometrySettings geometry{true, 5, 3, 1, -2};
+    const CrtGeometrySettings geometry{true, 5, 3, 1, -2, true};
     const auto epoch = capture->setOutputMode(mode, false, geometry);
     const FrameSpec spec{mode.fullFrameBytes(), mode.hActive, mode.vActive, epoch};
     QVERIFY(startLoop(*capture));

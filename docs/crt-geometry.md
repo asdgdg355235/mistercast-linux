@@ -7,11 +7,15 @@ determines the CRT scan timing & the payload dimensions.
 | Control | Range | Effect |
 |---|---|---|
 | Enable geometry | Off / On | Off keeps the saved values & bypasses processing |
+| Enable Cabinet Mode | Off / On | Enables Cabinet V-Size while geometry is on. Off keeps the saved amount. |
 | H-Size | −16 to +15 | Point sampling at width multiplier `(64 + step) / 64` |
 | H-Position | −48 to +48 px | Positive moves picture content right |
 | V-Shift | −16 to +15 lines | Positive moves picture content down |
 | Cabinet V-Size | −7 to +7 | Each step adds three virtual lines. Negative shrinks |
-| Reset Geometry | Button | Sets the four amounts to zero & retains On/Off |
+| Reset Geometry | Button | Sets the four amounts to zero & keeps both switches |
+
+In older profiles, Cabinet Mode starts enabled if geometry was on with a nonzero
+Cabinet V-Size. New profiles start with Cabinet Mode off.
 
 Interlaced V-Shift & Cabinet V-Size use field-lines. Each spans two positions
 in the full frame. Cabinet samples each parity independently, so the sender

@@ -28,6 +28,7 @@ private:
     Modeline mode_;
     bool unsupported_{};
     QCheckBox* enabled_;
+    QCheckBox* cabinetEnabled_;
     QSpinBox* hSize_;
     QSpinBox* hPosition_;
     QSpinBox* vShift_;

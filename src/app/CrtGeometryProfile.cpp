@@ -39,12 +39,18 @@ CrtGeometryProfile loadCrtGeometryProfile(QSettings& settings, const Modeline& m
             CrtGeometrySettings::algorithmVersion ||
         settings.value(path + QStringLiteral("timing")).toByteArray() != tuple) return {{}, true};
 
+    const bool enabled = settings.value(path + QStringLiteral("enabled")).toBool();
+    const int cabinet = settings.value(path + QStringLiteral("cabinetVSize")).toInt();
+    // Version 1 profiles without the new key used Cabinet whenever its
+    // amount was nonzero and the geometry master switch was on.
+    const bool cabinetEnabled = settings.value(path + QStringLiteral("cabinetEnabled"),
+                                               enabled && cabinet != 0).toBool();
     return {clampCrtGeometry({
-        settings.value(path + QStringLiteral("enabled")).toBool(),
+        enabled,
         settings.value(path + QStringLiteral("hSize")).toInt(),
         settings.value(path + QStringLiteral("hPosition")).toInt(),
         settings.value(path + QStringLiteral("vShift")).toInt(),
-        settings.value(path + QStringLiteral("cabinetVSize")).toInt()
+        cabinet, cabinetEnabled
     }, mode), false};
 }
 
@@ -61,6 +67,7 @@ void saveCrtGeometryProfile(QSettings& settings, const Modeline& mode, CrtGeomet
     settings.setValue(path + QStringLiteral("hPosition"), geometry.hPosition);
     settings.setValue(path + QStringLiteral("vShift"), geometry.vShift);
     settings.setValue(path + QStringLiteral("cabinetVSize"), geometry.cabinetVSize);
+    settings.setValue(path + QStringLiteral("cabinetEnabled"), geometry.cabinetEnabled);
 }
 
 ContentViewport loadContentViewport(QSettings& settings, const Modeline& mode)

@@ -26,6 +26,7 @@ QSpinBox* amount(QWidget* parent, const char* name, int minimum, int maximum)
 CrtGeometryControls::CrtGeometryControls(QWidget* parent)
     : QGroupBox(tr("CRT Geometry"), parent)
     , enabled_(new QCheckBox(tr("Enable geometry"), this))
+    , cabinetEnabled_(new QCheckBox(tr("Enable Cabinet Mode"), this))
     , hSize_(amount(this, "hSize", CrtGeometrySettings::minHSize, CrtGeometrySettings::maxHSize))
     , hPosition_(amount(this, "hPosition", CrtGeometrySettings::minHPosition, CrtGeometrySettings::maxHPosition))
     , vShift_(amount(this, "vShift", CrtGeometrySettings::minVShift, CrtGeometrySettings::maxVShift))
@@ -34,6 +35,7 @@ CrtGeometryControls::CrtGeometryControls(QWidget* parent)
     , summary_(new QLabel(this))
 {
     enabled_->setObjectName(QStringLiteral("geometryEnabled"));
+    cabinetEnabled_->setObjectName(QStringLiteral("cabinetEnabled"));
     reset_->setObjectName(QStringLiteral("resetGeometry"));
     hPosition_->setSuffix(tr(" px"));
     hPosition_->setToolTip(tr("Positive moves the picture right by output pixels."));
@@ -46,17 +48,19 @@ CrtGeometryControls::CrtGeometryControls(QWidget* parent)
     auto* layout = new QGridLayout(this);
     layout->addWidget(enabled_, 0, 0, 1, 2);
     layout->addWidget(reset_, 0, 2, 1, 2);
-    layout->addWidget(new QLabel(tr("H-Size"), this), 1, 0);
-    layout->addWidget(hSize_, 1, 1);
-    layout->addWidget(new QLabel(tr("H-Position"), this), 1, 2);
-    layout->addWidget(hPosition_, 1, 3);
-    layout->addWidget(new QLabel(tr("V-Shift"), this), 2, 0);
-    layout->addWidget(vShift_, 2, 1);
-    layout->addWidget(new QLabel(tr("Cabinet V-Size"), this), 2, 2);
-    layout->addWidget(cabinet_, 2, 3);
-    layout->addWidget(summary_, 3, 0, 1, 4);
+    layout->addWidget(cabinetEnabled_, 1, 0, 1, 4);
+    layout->addWidget(new QLabel(tr("H-Size"), this), 2, 0);
+    layout->addWidget(hSize_, 2, 1);
+    layout->addWidget(new QLabel(tr("H-Position"), this), 2, 2);
+    layout->addWidget(hPosition_, 2, 3);
+    layout->addWidget(new QLabel(tr("V-Shift"), this), 3, 0);
+    layout->addWidget(vShift_, 3, 1);
+    layout->addWidget(new QLabel(tr("Cabinet V-Size"), this), 3, 2);
+    layout->addWidget(cabinet_, 3, 3);
+    layout->addWidget(summary_, 4, 0, 1, 4);
 
     connect(enabled_, &QCheckBox::toggled, this, &CrtGeometryControls::changed);
+    connect(cabinetEnabled_, &QCheckBox::toggled, this, &CrtGeometryControls::changed);
     for (auto* spin : {hSize_, hPosition_, vShift_, cabinet_}) {
         connect(spin, &QSpinBox::valueChanged, this, &CrtGeometryControls::changed);
     }
@@ -77,8 +81,9 @@ void CrtGeometryControls::setMode(const Modeline& mode)
     const auto profile = loadCrtGeometryProfile(store, mode);
     unsupported_ = profile.unsupported;
     const QSignalBlocker enabledBlock(enabled_), hSizeBlock(hSize_), hPositionBlock(hPosition_),
-        vShiftBlock(vShift_), cabinetBlock(cabinet_);
+        vShiftBlock(vShift_), cabinetBlock(cabinet_), cabinetEnabledBlock(cabinetEnabled_);
     enabled_->setChecked(profile.geometry.enabled);
+    cabinetEnabled_->setChecked(profile.geometry.cabinetEnabled);
     hSize_->setValue(profile.geometry.hSize);
     hPosition_->setValue(profile.geometry.hPosition);
     vShift_->setSuffix(mode.interlaced ? tr(" field-lines") : tr(" rows"));
@@ -91,7 +96,7 @@ void CrtGeometryControls::setMode(const Modeline& mode)
 CrtGeometrySettings CrtGeometryControls::settings() const
 {
     return {enabled_->isChecked(), hSize_->value(), hPosition_->value(),
-        vShift_->value(), cabinet_->value()};
+        vShift_->value(), cabinet_->value(), cabinetEnabled_->isChecked()};
 }
 
 void CrtGeometryControls::changed()
@@ -109,9 +114,12 @@ void CrtGeometryControls::updateSummary()
     const bool valid = validCrtGeometryRaster(mode_);
     enabled_->setEnabled(valid && !unsupported_);
     reset_->setEnabled(valid && !unsupported_);
-    for (auto* spin : {hSize_, hPosition_, vShift_, cabinet_}) {
-        spin->setEnabled(valid && !unsupported_ && enabled_->isChecked());
+    cabinetEnabled_->setEnabled(valid && !unsupported_);
+    const bool geometryActive = valid && !unsupported_ && enabled_->isChecked();
+    for (auto* spin : {hSize_, hPosition_, vShift_}) {
+        spin->setEnabled(geometryActive);
     }
+    cabinet_->setEnabled(geometryActive && cabinetEnabled_->isChecked());
     if (unsupported_) {
         summary_->setText(tr("This timing has an unsupported geometry profile version."));
         return;

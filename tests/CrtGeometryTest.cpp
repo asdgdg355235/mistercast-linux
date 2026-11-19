@@ -94,7 +94,7 @@ void coordinates()
             const auto mode = raster(16, n * lanes, lanes == 2);
             for (int s = minimumCabinetSize(n); s <= 7; ++s) {
                 for (int dy = -16; dy <= 15; ++dy) {
-                    const auto plan = CrtGeometryPlan::make(mode, {true, 0, 0, dy, s});
+                    const auto plan = CrtGeometryPlan::make(mode, {true, 0, 0, dy, s, true});
                     CHECK(plan);
                     const int m = n + 3 * s;
                     int pos = 0;
@@ -112,10 +112,10 @@ void coordinates()
             }
         }
     }
-    CHECK(!CrtGeometryPlan::make(raster(8, 1), {true, 0, 0, 0, -1}));
+    CHECK(!CrtGeometryPlan::make(raster(8, 1), {true, 0, 0, 0, -1, true}));
     CHECK(!CrtGeometryPlan::make(raster(8, 3, true), {true, 1}));
     CHECK(!CrtGeometryPlan::make(raster(0, 3), {}));
-    const auto b = crtGeometryBounds(raster(8, 4), {true, -16, -48, 15, 1});
+    const auto b = crtGeometryBounds(raster(8, 4), {true, -16, -48, 15, 1, true});
     CHECK(b.left == 6 && b.right == 0 && b.top == 0 && b.bottom == 7);
 }
 
@@ -135,8 +135,8 @@ void pixels()
                 src[offset + 2] = y % 256;
             }
         }
-        const auto a = *CrtGeometryPlan::make(mode, {true, 6, -5, -3, -2});
-        const auto b = *CrtGeometryPlan::make(mode, {true, -16, 15, 1, 6});
+        const auto a = *CrtGeometryPlan::make(mode, {true, 6, -5, -3, -2, true});
+        const auto b = *CrtGeometryPlan::make(mode, {true, -16, 15, 1, 6, true});
         const auto neutral = *CrtGeometryPlan::make(mode, {});
         CHECK(!executor.applyGeometry(a, src, src));
         CHECK(!executor.applyGeometry(a, std::span(src).first(3), dest));
@@ -170,7 +170,7 @@ void pixels()
     }
 
     const auto mode = raster(32, 24, true);
-    const auto plan = *CrtGeometryPlan::make(mode, {true, 15, -5, -1, 2});
+    const auto plan = *CrtGeometryPlan::make(mode, {true, 15, -5, -1, 2, true});
     std::vector<std::uint8_t> input(mode.fullFrameBytes()), out(input.size()), want(input.size());
     for (std::size_t i = 0; i < input.size(); ++i) input[i] = (19 * i + i / 7) % 256;
     CHECK(single.applyGeometry(plan, input, want));
@@ -194,6 +194,51 @@ void pixels()
     executor.shutdown();
     rendering.join();
     CHECK(!executor.applyGeometry(plan, input, out));
+}
+
+void independentCabinetMode()
+{
+    ScalingExecutor executor(2);
+    for (bool interlaced : {false, true}) {
+        const auto mode = raster(32, 24, interlaced);
+        std::vector<std::uint8_t> source(mode.fullFrameBytes()), output(source.size()), expected(source.size());
+        for (std::size_t i = 0; i < source.size(); ++i) source[i] = (i * 17 + i / 11) % 251 + 1;
+        const auto render = [&](CrtGeometrySettings settings, auto& target) {
+            const auto plan = CrtGeometryPlan::make(mode, settings);
+            CHECK(plan);
+            for (unsigned row = 0; row < plan->height(); ++row) {
+                const auto sample = plan->sourceRow(row);
+                if (!settings.effectiveCabinetVSize()) CHECK(sample.weight == 0);
+                if (interlaced && sample.first >= 0) {
+                    CHECK(sample.first % 2 == int(row % 2) && sample.second % 2 == int(row % 2));
+                }
+            }
+            CHECK(executor.applyGeometry(*plan, source, target));
+        };
+        for (bool cabinet : {false, true}) {
+            render({false, 7, 3, -2, 3, cabinet}, output);
+            CHECK(output == source);
+        }
+        for (auto ordinary : {CrtGeometrySettings{true, 7}, {true, 0, 3},
+                              {true, 0, 0, -2}, {true, 7, 3, -2}}) {
+            render(ordinary, expected);
+            CHECK(expected != source);
+            ordinary.cabinetVSize = 3;
+            render(ordinary, output);
+            CHECK(output == expected);
+            ordinary.cabinetEnabled = true;
+            render(ordinary, output);
+            CHECK(output != expected);
+        }
+        const auto dormant = *CrtGeometryPlan::make(mode, {true, 7, 3, -2, 3});
+        const auto before = geometryAllocations.load();
+        trackGeometryAllocations = true;
+        for (int frame = 0; frame < 100; ++frame) {
+            CHECK(executor.applyGeometry(dormant, source, output));
+        }
+        trackGeometryAllocations = false;
+        CHECK(geometryAllocations.load() == before);
+    }
 }
 
 void viewportAllocations()
@@ -239,7 +284,7 @@ int main(int argc, char** argv)
                     CHECK(plan && plan->sourceColumn(y) == first);
                 } else {
                     CHECK(axis == 'V');
-                    const auto plan = CrtGeometryPlan::make(raster(8, n), {true, 0, 0, 0, s});
+                    const auto plan = CrtGeometryPlan::make(raster(8, n), {true, 0, 0, 0, s, true});
                     CHECK(plan);
                     const auto row = plan->sourceRow(y);
                     CHECK(row.first == first && row.second == std::min(first + 1, n - 1));
@@ -251,6 +296,7 @@ int main(int argc, char** argv)
             return 0;
         }
         coordinates();
+        independentCabinetMode();
         viewportAllocations();
         pixels();
         CHECK(blendGamma24(0, 255, 128) == 191);

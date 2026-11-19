@@ -46,7 +46,7 @@ int main(int argc, char** argv)
             Modeline{.name={},.hActive=720,.vActive=576,.interlaced=true}}) {
         const auto w = mode.hActive, h = mode.vActive;
         const SourceFrame source{input.data(), w, h, w * 3, PixelFormat::Rgb};
-        const auto plan = CrtGeometryPlan::make(mode, {true, 0, 0, 0, -3});
+        const auto plan = CrtGeometryPlan::make(mode, {true, 0, 0, 0, -3, true});
         if (!plan) return 1;
         for (const auto& [label, transform, calibration, cabinet] : std::array{
                  std::tuple{"off", static_cast<const IccTransform*>(nullptr), false, false},

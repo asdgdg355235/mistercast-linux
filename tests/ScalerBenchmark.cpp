@@ -99,7 +99,8 @@ int main(int argc, char** argv)
         };
         const struct { const char* name; CrtGeometrySettings settings; } variants[]{
             {"off", {}}, {"neutral", {true}}, {"horizontal", {true, 7, -9}},
-            {"cabinet-lut", {true, 0, 0, 0, 7}}, {"combined", {true, 7, -9, -5, 7}}
+            {"horizontal-cabinet-off", {true, 7, -9, 0, 7}},
+            {"cabinet-lut", {true, 0, 0, 0, 7, true}}, {"combined", {true, 7, -9, -5, 7, true}}
         };
         const std::vector<std::size_t> counts = workers == 1 ? std::vector<std::size_t>{1}
             : std::vector<std::size_t>{1, workers};

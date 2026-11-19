@@ -18,8 +18,19 @@ struct CrtGeometrySettings {
 
     bool enabled{};
     int hSize{}, hPosition{}, vShift{}, cabinetVSize{};
+    bool cabinetEnabled{};
 
-    bool effective() const { return enabled && (hSize || hPosition || vShift || cabinetVSize); }
+    int effectiveCabinetVSize() const { return enabled && cabinetEnabled ? cabinetVSize : 0; }
+    bool effective() const { return enabled && (hSize || hPosition || vShift || effectiveCabinetVSize()); }
+    // Keep inactive profile edits out of capture revisions and plan keys.
+    CrtGeometrySettings forRendering() const
+    {
+        if (!effective()) return {};
+        auto result = *this;
+        result.cabinetVSize = effectiveCabinetVSize();
+        result.cabinetEnabled = result.cabinetVSize != 0;
+        return result;
+    }
     bool operator==(const CrtGeometrySettings&) const = default;
 };
 

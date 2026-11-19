@@ -21,7 +21,7 @@ GeometryWindow window(const Modeline& mode, CrtGeometrySettings settings)
     const int lanes = mode.interlaced ? 2 : 1;
     const int height = mode.vActive / lanes;
     const int period = 64 + settings.hSize;
-    const int virtualHeight = height + 3 * settings.cabinetVSize;
+    const int virtualHeight = height + 3 * settings.effectiveCabinetVSize();
     return {width, height, (width * period + 63) / 64, virtualHeight,
             settings.hPosition, std::max(0, height - virtualHeight) + settings.vShift, period};
 }
